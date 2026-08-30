@@ -1,0 +1,11 @@
+* text=auto eol=lf
+
+# These fixtures are minified JSON, but treating tens of megabytes as a
+# single text line makes reviews and merges unusable. Keep bytes unchanged and
+# review regenerated assets through manifests, validation, and hashes.
+*.threeunity binary
+
+# Markdown uses two trailing spaces for explicit line breaks, and Unity emits
+# blank scalar values with a trailing space in some generated .meta files.
+*.md whitespace=-trailing-space
+*.meta whitespace=-trailing-space

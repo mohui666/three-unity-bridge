@@ -1,0 +1,10 @@
+{
+  "name": "ThreeUnity.Bridge.Editor",
+  "rootNamespace": "ThreeUnity.Bridge.Editor",
+  "references": [
+    "ThreeUnity.Bridge.Runtime"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ]
+}

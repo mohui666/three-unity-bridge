@@ -1,0 +1,60 @@
+{
+  "name": "three-unity-bridge",
+  "version": "0.1.0",
+  "description": "Package original Three.js web games in Unity or export scenes as Unity-importable assets.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./logic": {
+      "types": "./dist/logic/index.d.ts",
+      "import": "./dist/logic/index.js"
+    }
+  },
+  "bin": {
+    "three-unity": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "webview-host/Program.cs",
+    "webview-host/ThreeUnityWebHost.csproj",
+    "unity-package",
+    "examples/logic-adapters",
+    "docs/BRIDGE_PERFORMANCE.md",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
+    "test": "tsc -p tsconfig.tests.json && node --test dist-tests/tests/*.test.js",
+    "benchmark:collision": "npm run build && node benchmarks/collision-transport.mjs",
+    "benchmark:input": "npm run build && node benchmarks/input-transport.mjs",
+    "example": "npm run build && node examples/generate-scene.mjs",
+    "conversions:capture": "node conversion-tools/capture-games.mjs",
+    "check": "npm run test"
+  },
+  "keywords": [
+    "three.js",
+    "unity",
+    "webview2",
+    "scene",
+    "exporter"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "three": ">=0.160.0 <1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "@types/three": "^0.180.0",
+    "three": "^0.180.0",
+    "typescript": "^5.9.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

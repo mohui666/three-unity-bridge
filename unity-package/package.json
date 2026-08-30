@@ -1,0 +1,23 @@
+{
+  "name": "com.three-unity.bridge",
+  "version": "0.1.0",
+  "displayName": "Three.js to Unity Bridge",
+  "description": "Imports .threeunity scene assets and launches packaged Three.js web builds inside Unity players.",
+  "unity": "2021.3",
+  "author": {
+    "name": "Three Unity Bridge"
+  },
+  "keywords": [
+    "three.js",
+    "importer",
+    "webview",
+    "scene"
+  ],
+  "samples": [
+    {
+      "displayName": "Imported Triangle",
+      "description": "A minimal .threeunity asset that can be dragged into a scene.",
+      "path": "Samples~/Imported Triangle"
+    }
+  ]
+}

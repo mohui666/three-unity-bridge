@@ -1,0 +1,57 @@
+# Node / package output
+node_modules/
+dist/
+dist-tests/
+.package-smoke/
+coverage/
+.nyc_output/
+*.tgz
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# .NET output
+bin/
+obj/
+TestResults/
+*.trx
+*.nupkg
+*.user
+*.suo
+.vs/
+
+# Unity-generated state and Player builds
+Library/
+Temp/
+Logs/
+Build/
+Builds/
+UserSettings/
+MemoryCaptures/
+Recordings/
+*.utmp
+
+# Local integration workspaces and cloned upstream games
+conversion-work/
+unity-smoke/
+unity-winding-verify*/
+
+# Runtime/build diagnostics
+*.log
+crash.dmp
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+
+# Editor and operating-system noise
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini

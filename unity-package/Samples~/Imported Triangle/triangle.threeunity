@@ -1,0 +1,71 @@
+{
+  "format": "three-unity-scene",
+  "version": 1,
+  "generator": "three-unity-bridge/0.1.0",
+  "name": "Imported Triangle",
+  "coordinateSystem": "threejs-right-handed-y-up",
+  "unitScaleMeters": 1,
+  "nodes": [
+    {
+      "id": "node_scene",
+      "name": "Three Scene",
+      "parentId": "",
+      "visible": true,
+      "position": [0, 0, 0],
+      "quaternion": [0, 0, 0, 1],
+      "scale": [1, 1, 1],
+      "layersMask": 1,
+      "meshId": "",
+      "metadataJson": "{}",
+      "components": []
+    },
+    {
+      "id": "node_triangle",
+      "name": "AI Triangle",
+      "parentId": "node_scene",
+      "visible": true,
+      "position": [0, 0, 0],
+      "quaternion": [0, 0, 0, 1],
+      "scale": [1, 1, 1],
+      "layersMask": 1,
+      "meshId": "mesh_triangle",
+      "metadataJson": "{\"gameplayTag\":\"sample\"}",
+      "components": []
+    }
+  ],
+  "meshes": [
+    {
+      "id": "mesh_triangle",
+      "name": "Triangle",
+      "positions": [-1, 0, 0, 1, 0, 0, 0, 1.5, 0],
+      "normals": [0, 0, 1, 0, 0, 1, 0, 0, 1],
+      "uv0": [0, 0, 1, 0, 0.5, 1],
+      "colors": [],
+      "indices": [0, 1, 2],
+      "groups": [],
+      "materialIds": ["material_blue"]
+    }
+  ],
+  "materials": [
+    {
+      "id": "material_blue",
+      "name": "Bridge Blue",
+      "sourceType": "MeshStandardMaterial",
+      "baseColor": [0.08, 0.45, 1, 1],
+      "emissive": [0, 0, 0],
+      "metallic": 0.1,
+      "roughness": 0.45,
+      "opacity": 1,
+      "transparent": false,
+      "doubleSided": true,
+      "alphaCutoff": 0,
+      "unlit": false,
+      "baseColorTextureId": "",
+      "emissiveTextureId": "",
+      "normalTextureId": "",
+      "metallicRoughnessTextureId": ""
+    }
+  ],
+  "textures": [],
+  "warnings": []
+}

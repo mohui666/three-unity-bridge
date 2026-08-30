@@ -1,0 +1,13 @@
+{
+  "name": "ThreeUnity.Bridge.Tests",
+  "rootNamespace": "ThreeUnity.Bridge.Tests",
+  "references": [
+    "ThreeUnity.Bridge.Runtime"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ],
+  "optionalUnityReferences": [
+    "TestAssemblies"
+  ]
+}
