@@ -47,6 +47,8 @@ interface WebViewBridge {
   removeEventListener?(type: "message", handler: (event: WebViewEvent) => void): void;
 }
 
+export const WEBVIEW_LISTENER_READY_CONTROL_MESSAGE = "THREE_UNITY_WEB_LISTENER_READY";
+
 let fallbackSessionCounter = 0;
 const SESSION_ID_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
@@ -109,6 +111,19 @@ function findWebViewBridge(scope: unknown): WebViewBridge | undefined {
   return candidate as WebViewBridge;
 }
 
+/**
+ * Acknowledge that a page-level chrome.webview message listener is installed.
+ * The WebView Host consumes this reserved control string and does not forward it
+ * to Unity. Custom pages that do not use WebViewLogicTransport should call this
+ * immediately after registering their own message listener.
+ */
+export function notifyWebViewListenerReady(scope: unknown = globalThis): boolean {
+  const webview = findWebViewBridge(scope);
+  if (!webview) return false;
+  webview.postMessage(WEBVIEW_LISTENER_READY_CONTROL_MESSAGE);
+  return true;
+}
+
 export class WebViewLogicTransport implements LogicTransport {
   private readonly webview?: WebViewBridge;
 
@@ -131,6 +146,10 @@ export class WebViewLogicTransport implements LogicTransport {
       handler(typeof event.data === "string" ? event.data : JSON.stringify(event.data));
     };
     this.webview.addEventListener("message", listener);
+    // Install first, acknowledge second: the Host will not drain cached
+    // Unity->Web traffic until this control frame and NavigationCompleted have
+    // both arrived.
+    this.webview.postMessage(WEBVIEW_LISTENER_READY_CONTROL_MESSAGE);
     return () => this.webview?.removeEventListener?.("message", listener);
   }
 }

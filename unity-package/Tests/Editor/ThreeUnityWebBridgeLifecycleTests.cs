@@ -1,6 +1,7 @@
 using System.Reflection;
 using NUnit.Framework;
 using UnityEngine;
+using UnityEngine.TestTools;
 
 namespace ThreeUnity.Bridge.Tests
 {
@@ -558,6 +559,9 @@ namespace ThreeUnity.Bridge.Tests
             Assert.That(combined.ReliableQueued, Is.EqualTo(2));
             Assert.That(combined.LatestQueued, Is.EqualTo(3));
             Assert.That(combined.LatestCoalesced, Is.EqualTo(1));
+            Assert.That(combined.ReliableBackpressureRejected, Is.EqualTo(1));
+            // The accepted reliable head becomes an actual loss only when its
+            // physical connection is retired; the rejected enqueue is retryable.
             Assert.That(combined.ReliableDropped, Is.EqualTo(1));
             Assert.That(combined.Dequeued, Is.EqualTo(1));
             Assert.That(combined.PendingReliable, Is.Zero);
@@ -595,6 +599,67 @@ namespace ThreeUnity.Bridge.Tests
             Assert.DoesNotThrow(() => Object.DestroyImmediate(gameObject));
         }
 
+        [Test]
+        public void FailedJobTerminationIsRetriedUntilChildrenDrain()
+        {
+            var gameObject = new GameObject("bridge-job-retry-test");
+            var launcher = gameObject.AddComponent<ThreeUnityWebBridgeLauncher>();
+            var job = new RetryHostJob();
+            try
+            {
+                var launcherType = typeof(ThreeUnityWebBridgeLauncher);
+                var lifecycle = (ThreeUnityWebBridgeLifecycle)launcherType
+                    .GetField("lifecycle", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .GetValue(launcher);
+                Assert.That(lifecycle.Start(0), Is.True);
+                Assert.That(lifecycle.TryBeginLaunch(
+                    0,
+                    true,
+                    out var page,
+                    out var connection), Is.True);
+                Assert.That(lifecycle.TryReportFault(
+                    page,
+                    connection,
+                    ThreeUnityHostFaultReason.HostExitedBeforeConnect), Is.True);
+
+                SetLauncherField(launcher, "hostJob", job);
+                SetLauncherField(launcher, "hostJobPageGeneration", page);
+                SetLauncherField(launcher, "hostJobConnectionGeneration", connection);
+                SetLauncherField(launcher, "trackedHostPageGeneration", page);
+                SetLauncherField(launcher, "trackedHostConnectionGeneration", connection);
+                SetLauncherField(launcher, "trackedHostAssignedToJob", true);
+
+                var complete = launcherType.GetMethod(
+                    "CompleteRetirementWithoutHost",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                Assert.That(complete, Is.Not.Null);
+
+                LogAssert.Expect(
+                    LogType.Error,
+                    "THREE_UNITY_WEB_BRIDGE_JOB_TERMINATE_FAILED"
+                    + " attempts=1 message=synthetic first failure");
+                complete.Invoke(launcher, new object[] { page, connection, 1000L });
+                Assert.That(job.TerminateCalls, Is.EqualTo(1));
+                Assert.That(job.ActiveProcessCount, Is.EqualTo(1));
+                Assert.That(lifecycle.State, Is.EqualTo(ThreeUnityHostLifecycleState.Retiring));
+
+                // Calls are throttled instead of flooding TerminateJobObject and logs.
+                complete.Invoke(launcher, new object[] { page, connection, 1100L });
+                Assert.That(job.TerminateCalls, Is.EqualTo(1));
+                Assert.That(lifecycle.State, Is.EqualTo(ThreeUnityHostLifecycleState.Retiring));
+
+                complete.Invoke(launcher, new object[] { page, connection, 1250L });
+                Assert.That(job.TerminateCalls, Is.EqualTo(2));
+                Assert.That(job.ActiveProcessCount, Is.Zero);
+                Assert.That(job.IsDisposed, Is.True);
+                Assert.That(lifecycle.State, Is.EqualTo(ThreeUnityHostLifecycleState.WaitingToLaunch));
+            }
+            finally
+            {
+                Object.DestroyImmediate(gameObject);
+            }
+        }
+
         private static void AssertAllReadinessDeadlinesCleared(
             ThreeUnityWebBridgeLifecycle lifecycle)
         {
@@ -614,6 +679,42 @@ namespace ThreeUnity.Bridge.Tests
             Assert.That(lifecycle.Start(0), Is.True);
             Assert.That(lifecycle.TryBeginLaunch(0, true, out page, out connection), Is.True);
             return lifecycle;
+        }
+
+        private static void SetLauncherField(
+            ThreeUnityWebBridgeLauncher launcher,
+            string name,
+            object value)
+        {
+            var field = typeof(ThreeUnityWebBridgeLauncher).GetField(
+                name,
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(field, Is.Not.Null, name);
+            field.SetValue(launcher, value);
+        }
+
+        private sealed class RetryHostJob : IThreeUnityWindowsHostJob
+        {
+            public bool IsDisposed { get; private set; }
+            public int ActiveProcessCount { get; private set; } = 1;
+            public int TerminateCalls { get; private set; }
+
+            public void Assign(System.Diagnostics.Process process)
+            {
+            }
+
+            public void Terminate()
+            {
+                TerminateCalls++;
+                if (TerminateCalls == 1)
+                    throw new System.ComponentModel.Win32Exception("synthetic first failure");
+                ActiveProcessCount = 0;
+            }
+
+            public void Dispose()
+            {
+                IsDisposed = true;
+            }
         }
     }
 }

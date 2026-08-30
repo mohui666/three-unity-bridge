@@ -10,12 +10,20 @@ using Microsoft.Win32.SafeHandles;
 
 namespace ThreeUnity.Bridge
 {
+    internal interface IThreeUnityWindowsHostJob : IDisposable
+    {
+        bool IsDisposed { get; }
+        int ActiveProcessCount { get; }
+        void Assign(Process process);
+        void Terminate();
+    }
+
     /// <summary>
     /// Owns a Windows Job Object configured to terminate every assigned Host when
     /// the owning Unity process closes its last Job handle. Keep one instance for
     /// the complete launcher lifetime and assign each physical Host generation to it.
     /// </summary>
-    public sealed class ThreeUnityWindowsHostJob : IDisposable
+    public sealed class ThreeUnityWindowsHostJob : IThreeUnityWindowsHostJob
     {
         private readonly object syncRoot = new object();
         private int disposed;

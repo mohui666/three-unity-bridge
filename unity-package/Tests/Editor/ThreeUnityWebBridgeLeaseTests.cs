@@ -129,6 +129,54 @@ namespace ThreeUnity.Bridge.Tests
             }
         }
 
+        [Test]
+        public void RetainedLeaseUsesTokensAndDoesNotKeepConnectionResourcesAlive()
+        {
+            var gameObject = new GameObject("bridge-lightweight-lease-test");
+            var launcher = gameObject.AddComponent<ThreeUnityWebBridgeLauncher>();
+            ThreeUnityWebBridgeLease lease = null;
+            try
+            {
+                var lifecycle = GetLifecycle(launcher);
+                lifecycle.Start(0);
+                Assert.That(lifecycle.TryBeginLaunch(0, true, out var page, out var pipe), Is.True);
+                Assert.That(lifecycle.TryMarkConnected(page, pipe), Is.True);
+
+                var connectionReference = InstallReleaseAndReferenceConnection(
+                    launcher,
+                    page,
+                    pipe,
+                    out lease);
+
+                var issuerField = typeof(ThreeUnityWebBridgeLease).GetField(
+                    "issuerToken",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                var connectionField = typeof(ThreeUnityWebBridgeLease).GetField(
+                    "connectionToken",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                Assert.That(issuerField, Is.Not.Null);
+                Assert.That(connectionField, Is.Not.Null);
+                Assert.That(issuerField.GetValue(lease), Is.Not.SameAs(launcher));
+
+                for (var attempt = 0; attempt < 3 && connectionReference.IsAlive; attempt++)
+                {
+                    GC.Collect();
+                    GC.WaitForPendingFinalizers();
+                    GC.Collect();
+                }
+
+                Assert.That(
+                    connectionReference.IsAlive,
+                    Is.False,
+                    "An externally retained lease must not retain disposed ConnectionResources.");
+                GC.KeepAlive(lease);
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(gameObject);
+            }
+        }
+
         private static ThreeUnityWebBridgeLifecycle GetLifecycle(ThreeUnityWebBridgeLauncher launcher)
         {
             return (ThreeUnityWebBridgeLifecycle)typeof(ThreeUnityWebBridgeLauncher)
@@ -158,14 +206,34 @@ namespace ThreeUnity.Bridge.Tests
                 },
                 null);
             lease = new ThreeUnityWebBridgeLease(
-                launcher,
-                connection,
+                launcherType.GetField("leaseIssuerIdentity", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .GetValue(launcher),
+                connectionType.GetProperty("LeaseIdentity").GetValue(connection),
                 pageGeneration,
                 connectionGeneration);
             connectionType.GetProperty("Lease").SetValue(connection, lease);
             launcherType.GetField("activeConnection", BindingFlags.Instance | BindingFlags.NonPublic)
                 .SetValue(launcher, connection);
             return connection;
+        }
+
+        private static WeakReference InstallReleaseAndReferenceConnection(
+            ThreeUnityWebBridgeLauncher launcher,
+            long pageGeneration,
+            long connectionGeneration,
+            out ThreeUnityWebBridgeLease lease)
+        {
+            var connection = InstallConnection(
+                launcher,
+                pageGeneration,
+                connectionGeneration,
+                out lease);
+            var weakReference = new WeakReference(connection);
+            typeof(ThreeUnityWebBridgeLauncher)
+                .GetField("activeConnection", BindingFlags.Instance | BindingFlags.NonPublic)
+                .SetValue(launcher, null);
+            DisposeConnection(connection);
+            return weakReference;
         }
 
         private static void DisposeConnection(object connection)

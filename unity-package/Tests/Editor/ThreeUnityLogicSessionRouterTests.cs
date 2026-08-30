@@ -42,6 +42,187 @@ namespace ThreeUnity.Bridge.Tests
         }
 
         [Test]
+        public void BuiltInOutgoingUsesMetadataFastPathAndLegacyModulesKeepFallbackParsing()
+        {
+            using (var builtIn = new ThreeUnityLogicSessionRouter("shop-flight-v1"))
+            {
+                Assert.That(Route(builtIn, Hello("session-fast", 0)),
+                    Is.EqualTo(ThreeUnityLogicRouteResult.Handled));
+                Assert.That(builtIn.TryDequeueOutgoingMessage(out var ready), Is.True);
+                Assert.That(ready.Type, Is.EqualTo("bridge.ready"));
+                Assert.That(ready.SessionId, Is.EqualTo("session-fast"));
+                Assert.That(builtIn.OutgoingMetadataFastPath, Is.EqualTo(1));
+                Assert.That(builtIn.OutgoingMetadataFallbackParses, Is.Zero);
+            }
+
+            var legacyModule = new RecordingModule();
+            using (var legacy = new ThreeUnityLogicSessionRouter(
+                "recording-v1",
+                _ => legacyModule))
+            {
+                legacyModule.EnqueueOutgoing(LogicEnvelopeWriter.Encode(
+                    "custom.state",
+                    7,
+                    "legacy-session",
+                    new TestPayload { value = 9 }));
+
+                Assert.That(legacy.TryDequeueOutgoingMessage(out var state), Is.True);
+                Assert.That(state.Type, Is.EqualTo("custom.state"));
+                Assert.That(state.SessionId, Is.EqualTo("legacy-session"));
+                Assert.That(state.IsLatestState, Is.True);
+                Assert.That(state.StreamKey, Is.EqualTo("legacy-session:custom.state"));
+                Assert.That(legacy.OutgoingMetadataFastPath, Is.Zero);
+                Assert.That(legacy.OutgoingMetadataFallbackParses, Is.EqualTo(1));
+            }
+        }
+
+        [Test]
+        public void OutgoingMetadataClassificationBenchmarkAvoidsHeaderReparse()
+        {
+            const int iterations = 25_000;
+            var message = LogicEnvelopeWriter.EncodeMessage(
+                "flight.state",
+                17,
+                "benchmark-session",
+                new TestPayload { value = 42 });
+            long parsedChecksum = 0;
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+            for (var index = 0; index < iterations; index++)
+            {
+                if (!LogicEnvelopeParser.TryParseHeader(
+                    message.Json,
+                    out var header,
+                    out var error))
+                    Assert.Fail(error);
+                parsedChecksum += header.seq + header.type.Length + header.sessionId.Length;
+            }
+            stopwatch.Stop();
+            var parseTicks = stopwatch.ElapsedTicks;
+
+            long metadataChecksum = 0;
+            stopwatch.Restart();
+            for (var index = 0; index < iterations; index++)
+                metadataChecksum += message.Type.Length + message.SessionId.Length + (message.IsLatestState ? 17 : 0);
+            stopwatch.Stop();
+            var metadataTicks = stopwatch.ElapsedTicks;
+
+            Assert.That(metadataChecksum, Is.EqualTo(parsedChecksum));
+            UnityEngine.Debug.Log("THREE_UNITY_OUTBOUND_METADATA_BENCHMARK"
+                + " iterations=" + iterations
+                + " parseTicks=" + parseTicks
+                + " metadataTicks=" + metadataTicks
+                + " avoidedHeaderParses=" + iterations);
+        }
+
+        [Test]
+        public void NegotiatedLifecycleWaitsForReadyAndCoalescesToTheLatestPlayerState()
+        {
+            using (var router = new ThreeUnityLogicSessionRouter("shop-flight-v1"))
+            {
+                Assert.That(Route(router, Hello("lifecycle-session", 0, lifecycle: true)),
+                    Is.EqualTo(ThreeUnityLogicRouteResult.Handled));
+                Assert.That(router.SetApplicationLifecycle(false, false), Is.True);
+                Assert.That(router.SetApplicationLifecycle(true, true), Is.True);
+
+                Assert.That(router.TryDequeueOutgoingMessage(out var ready), Is.True);
+                Assert.That(ready.Type, Is.EqualTo("bridge.ready"));
+                Assert.That(router.TryDequeueOutgoingMessage(out var lifecycle), Is.True);
+                Assert.That(lifecycle.Type, Is.EqualTo("runtime.lifecycle.state"));
+                Assert.That(lifecycle.SessionId, Is.EqualTo("lifecycle-session"));
+                Assert.That(lifecycle.IsLatestState, Is.True);
+                StringAssert.Contains("\"focused\":true", lifecycle.Json);
+                StringAssert.Contains("\"paused\":true", lifecycle.Json);
+                StringAssert.Contains("\"active\":false", lifecycle.Json);
+                StringAssert.Contains("\"revision\":2", lifecycle.Json);
+                Assert.That(router.LifecycleChanges, Is.EqualTo(2));
+                Assert.That(router.LifecycleCoalesced, Is.EqualTo(2));
+                Assert.That(router.LifecycleEmitted, Is.EqualTo(1));
+                Assert.That(router.TryDequeueOutgoingMessage(out _), Is.False);
+
+                Assert.That(router.SetApplicationLifecycle(true, false), Is.True);
+                Assert.That(router.TryDequeueOutgoingMessage(out var resumed), Is.True);
+                StringAssert.Contains("\"active\":true", resumed.Json);
+                StringAssert.Contains("\"revision\":3", resumed.Json);
+            }
+        }
+
+        [Test]
+        public void LifecycleRemainsDisabledWhenTheBrowserDoesNotAdvertiseTheFeature()
+        {
+            using (var router = new ThreeUnityLogicSessionRouter("shop-flight-v1"))
+            {
+                Route(router, Hello("legacy-browser", 0));
+                Assert.That(router.TryDequeueOutgoingMessage(out var ready), Is.True);
+                Assert.That(ready.Type, Is.EqualTo("bridge.ready"));
+
+                Assert.That(router.SetApplicationLifecycle(false, true), Is.True);
+                Assert.That(router.TryDequeueOutgoingMessage(out _), Is.False);
+                Assert.That(router.LifecycleEmitted, Is.Zero);
+                Assert.That(router.ApplicationActive, Is.False);
+            }
+        }
+
+        [Test]
+        public void LifecycleAcknowledgementsAreValidatedWithoutFallingBackTheGameModule()
+        {
+            using (var router = new ThreeUnityLogicSessionRouter("shop-flight-v1"))
+            {
+                Route(router, Hello("ack-session", 0, lifecycle: true));
+                Assert.That(router.TryDequeueOutgoingMessage(out _), Is.True);
+                Assert.That(router.TryDequeueOutgoingMessage(out var state), Is.True);
+                StringAssert.Contains("\"revision\":0", state.Json);
+
+                Assert.That(Route(router, LifecycleAck("ack-session", 0, 0, true)),
+                    Is.EqualTo(ThreeUnityLogicRouteResult.Handled));
+                Assert.That(router.LifecycleAcknowledged, Is.EqualTo(1));
+
+                Assert.That(Route(router, LifecycleAck("ack-session", 1, 0, true)),
+                    Is.EqualTo(ThreeUnityLogicRouteResult.Handled));
+                Assert.That(Route(router,
+                    "{\"protocol\":1,\"sessionId\":\"ack-session\",\"type\":\"runtime.lifecycle.ack\",\"seq\":2,\"payload\":{\"revision\":0}}"),
+                    Is.EqualTo(ThreeUnityLogicRouteResult.Handled));
+                Assert.That(router.LifecycleAckRejected, Is.EqualTo(2));
+
+                router.SetApplicationLifecycle(false, false);
+                Assert.That(router.TryDequeueOutgoingMessage(out _), Is.True);
+                router.SetApplicationLifecycle(true, false);
+                Assert.That(router.TryDequeueOutgoingMessage(out _), Is.True);
+                Assert.That(Route(router, LifecycleAck("ack-session", 3, 1, false)),
+                    Is.EqualTo(ThreeUnityLogicRouteResult.Handled));
+                Assert.That(Route(router, LifecycleAck("ack-session", 4, 2, true)),
+                    Is.EqualTo(ThreeUnityLogicRouteResult.Handled));
+                Assert.That(router.LifecycleAcknowledged, Is.EqualTo(3));
+                Assert.That(router.CurrentModule.IsFallback, Is.False);
+            }
+        }
+
+        [Test]
+        public void SessionRestartDiscardsOldLifecycleAndSnapshotsCurrentStateForTheNewSession()
+        {
+            using (var router = new ThreeUnityLogicSessionRouter("shop-flight-v1"))
+            {
+                Route(router, Hello("old-lifecycle", 0, lifecycle: true));
+                router.SetApplicationLifecycle(false, false);
+
+                Assert.That(Route(router, Hello(
+                    "new-lifecycle",
+                    0,
+                    "old-lifecycle",
+                    lifecycle: true)), Is.EqualTo(ThreeUnityLogicRouteResult.Restarted));
+                Assert.That(router.RetiredOutgoingDiscarded, Is.EqualTo(2));
+                Assert.That(router.TryDequeueOutgoingMessage(out var ready), Is.True);
+                Assert.That(ready.Type, Is.EqualTo("bridge.ready"));
+                Assert.That(ready.SessionId, Is.EqualTo("new-lifecycle"));
+                Assert.That(router.TryDequeueOutgoingMessage(out var state), Is.True);
+                Assert.That(state.Type, Is.EqualTo("runtime.lifecycle.state"));
+                Assert.That(state.SessionId, Is.EqualTo("new-lifecycle"));
+                StringAssert.Contains("\"active\":false", state.Json);
+                StringAssert.Contains("\"revision\":1", state.Json);
+                Assert.That(router.TryDequeueOutgoingMessage(out _), Is.False);
+            }
+        }
+
+        [Test]
         public void NewHelloWithMatchingPreviousSessionReplacesAFallbackModule()
         {
             using (var router = new ThreeUnityLogicSessionRouter("shop-flight-v1"))
@@ -333,6 +514,7 @@ namespace ThreeUnity.Bridge.Tests
             AssertHeader(ready, "bridge.ready", 0, "voxel-session");
             StringAssert.Contains(VoxelPlayerLogicModule.CollisionDeltaFeature, ready);
             StringAssert.Contains(ThreeUnityLogicFeatures.SessionRestart, ready);
+            StringAssert.Contains(ThreeUnityLogicFeatures.RuntimeLifecycle, ready);
 
             HandleDirect(module, "{\"protocol\":1,\"sessionId\":\"voxel-session\",\"type\":\"world.collision\",\"seq\":1,\"payload\":{\"revision\":5,\"origin\":{\"x\":0,\"y\":0,\"z\":0},\"size\":{\"x\":1,\"y\":1,\"z\":1},\"solidBits\":\"AA==\",\"fluidBits\":\"AA==\"}}");
             HandleDirect(module, "{\"protocol\":1,\"sessionId\":\"voxel-session\",\"type\":\"world.collision.delta\",\"seq\":2,\"payload\":{\"baseRevision\":4,\"revision\":6,\"origin\":{\"x\":0,\"y\":0,\"z\":0},\"size\":{\"x\":1,\"y\":1,\"z\":1},\"changeCount\":0,\"changes\":\"\"}}");
@@ -375,15 +557,32 @@ namespace ThreeUnity.Bridge.Tests
             string sessionId,
             long sequence,
             string previousSessionId = null,
-            string profile = "shop-flight-v1")
+            string profile = "shop-flight-v1",
+            bool lifecycle = false)
         {
             var previous = previousSessionId == null
                 ? string.Empty
                 : ",\"previousSessionId\":\"" + previousSessionId + "\"";
+            var lifecycleCapability = lifecycle
+                ? ",\"" + ThreeUnityLogicFeatures.RuntimeLifecycle + "\""
+                : string.Empty;
             return "{\"protocol\":1,\"sessionId\":\"" + sessionId
                 + "\",\"type\":\"bridge.hello\",\"seq\":" + sequence
-                + ",\"payload\":{\"gameId\":\"test-game\",\"capabilities\":[\"" + profile + "\"]"
+                + ",\"payload\":{\"gameId\":\"test-game\",\"capabilities\":[\"" + profile + "\""
+                + lifecycleCapability + "]"
                 + previous + "}}";
+        }
+
+        private static string LifecycleAck(
+            string sessionId,
+            long sequence,
+            long revision,
+            bool active)
+        {
+            return "{\"protocol\":1,\"sessionId\":\"" + sessionId
+                + "\",\"type\":\"runtime.lifecycle.ack\",\"seq\":" + sequence
+                + ",\"payload\":{\"revision\":" + revision
+                + ",\"active\":" + (active ? "true" : "false") + "}}";
         }
 
         private static string Restart(string sessionId, long sequence, string previousSessionId)
@@ -423,6 +622,7 @@ namespace ThreeUnity.Bridge.Tests
 
         private sealed class RecordingModule : IThreeUnityLogicModule
         {
+            private readonly Queue<string> outgoing = new Queue<string>();
             private string sessionId;
 
             public string Profile => "recording-v1";
@@ -452,8 +652,18 @@ namespace ThreeUnity.Bridge.Tests
 
             public bool TryDequeueOutgoing(out string json)
             {
-                json = null;
-                return false;
+                if (outgoing.Count == 0)
+                {
+                    json = null;
+                    return false;
+                }
+                json = outgoing.Dequeue();
+                return true;
+            }
+
+            public void EnqueueOutgoing(string json)
+            {
+                outgoing.Enqueue(json);
             }
 
             public void ForceFallback(string reason)

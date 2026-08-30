@@ -97,7 +97,7 @@ test("reusable shop authority stays on fallback until a matching state arrives",
 
   assert.deepEqual(client.started, {
     gameId: "name-to-shop",
-    capabilities: ["shop-flight-v1", "session-restart-v1"],
+    capabilities: ["shop-flight-v1", "session-restart-v1", "runtime-lifecycle-v1"],
   });
   authority.update(0.1);
   client.emit("bridge.ready", { profile: "shop-flight-v1", fixedDeltaTime: 0.02 });
@@ -113,6 +113,53 @@ test("reusable shop authority stays on fallback until a matching state arrives",
   assert.equal(applied.length, 1);
   assert.equal(authority.authorityActive, true);
   assert.equal(client.activated, true);
+});
+
+test("shop authority acknowledges negotiated lifecycle state and gates runtime frames", () => {
+  const client = new FakeClient();
+  const lifecycleChanges: boolean[] = [];
+  const authority = createShopFlightAuthority({
+    client,
+    getSnapshot: () => ({ time: 0, amplitude: 0, flying: false }),
+    applyState: () => undefined,
+    runFallbackFrame: () => undefined,
+    onRuntimeLifecycle: lifecycle => lifecycleChanges.push(lifecycle.active),
+  });
+  client.emit("bridge.ready", {
+    profile: "shop-flight-v1",
+    features: ["session-restart-v1", "runtime-lifecycle-v1"],
+  });
+
+  client.emit("runtime.lifecycle.state", {
+    focused: false,
+    paused: false,
+    active: false,
+    revision: 3,
+  }, 1);
+
+  let rendered = 0;
+  assert.equal(authority.runtimeActive, false);
+  assert.equal(authority.runRuntimeFrame(() => { rendered++; }), false);
+  assert.equal(rendered, 0);
+  assert.deepEqual(client.sent.at(-1), {
+    type: "runtime.lifecycle.ack",
+    payload: { revision: 3, active: false },
+  });
+
+  client.emit("runtime.lifecycle.state", {
+    focused: true,
+    paused: false,
+    active: true,
+    revision: 4,
+  }, 2);
+  assert.equal(authority.runRuntimeFrame(() => { rendered++; }), true);
+  assert.equal(rendered, 1);
+  assert.deepEqual(lifecycleChanges, [false, true]);
+  assert.equal(authority.runtimeLifecycleMetrics.suspendedFrames, 1);
+  assert.equal(authority.runtimeLifecycleMetrics.activeFrames, 1);
+
+  client.emit("bridge.fallback", { reason: "test-fallback" }, 3);
+  assert.equal(authority.runtimeActive, true);
 });
 
 test("shop authority scopes commands and states to the current generation", () => {

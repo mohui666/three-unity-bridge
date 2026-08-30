@@ -28,3 +28,22 @@
   and batched Unity-to-Web UI dispatches instead of scheduling one UI callback per message.
 - Added an independent 250 ms parent-process watcher so the embedded WebView helper
   cannot remain orphaned when a Unity Player is terminated abruptly.
+- Added document-scoped WebView readiness. Unity-to-Web dispatch now waits for both
+  the current `ContentLoading.NavigationId` and its listener ACK; redirect completions
+  cannot reuse an old ACK, while hash/history navigation no longer restarts the Host.
+- Added per-session outbound owner purge, reliable/latest fairness, lightweight leases,
+  and separate backpressure, actual-drop, owner-purge, and fairness telemetry.
+- Added a Windows Job zero-process relaunch fence and throttled retry when the first
+  `TerminateJobObject` call fails after the root Host has already exited.
+- Added physical Host-kill, connect-timeout, and page-ready-timeout Player harnesses
+  with exact process handles, one-shot fault injection, overlap detection, and orphan checks.
+- Added optional producer-carried outgoing type/session metadata. Built-in modules now
+  classify reliable/latest traffic without reparsing their serialized JSON, while legacy
+  third-party modules retain the original string-queue fallback and separate telemetry.
+- Bounded each logic-to-transport flush to 256 successful messages, retaining burst
+  backlog in FIFO order for later Unity callbacks and reporting budget/max-batch telemetry.
+- Added capability-negotiated `runtime-lifecycle-v1`: Unity publishes session-scoped,
+  latest-only Player focus/pause state after `bridge.ready`, validates reliable browser
+  acknowledgements, and purges retired lifecycle state across logical/physical restarts.
+- Added a fail-open browser `RuntimeLifecycleGate` and integrated name-to-shop so inactive
+  Players skip expensive render/update frames and suspend Web Audio without catch-up bursts.

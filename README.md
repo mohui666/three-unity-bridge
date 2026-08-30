@@ -113,17 +113,25 @@ npx three-unity build-web-unity .\dist C:\Path\To\UnityProject `
 
 游戏侧只需一个薄适配层：提供当前快照、把 Unity 状态应用回 Three.js，以及保留原 JavaScript 帧函数作为回退。通用握手、序列号、generation 隔离、首状态超时和运行中 watchdog 都在 SDK 中。每次连接使用独立的紧凑随机 `sessionId`；fallback 是不可被迟到状态重新打开的粘滞边界。只有 Unity 的 `ready.features` 明确声明 `session-restart-v1` 时，适配器才会自动重连、重建 Unity 模块并从当前 JavaScript 快照重新 bootstrap；未声明该能力时保持 JavaScript 回退，不进行无效重试。可复制的接入文件见 [`examples/logic-adapters/name-to-shop/unity-flight-adapter.js`](examples/logic-adapters/name-to-shop/unity-flight-adapter.js)。Unity 未启用 profile、WebView2 不可用、协议不匹配或状态中断时，适配器会继续/恢复原 JavaScript 逻辑。
 
+可选的 `runtime-lifecycle-v1` 把 Unity Player 的聚焦/暂停状态桥接给网页，而不是依赖嵌入 WebView 不可靠的可见性事件。Unity 只会在双方声明能力、当前会话 `bridge.ready` 已先发出后发送 `runtime.lifecycle.state`；快速变化按会话只保留最新状态，网页用 `runtime.lifecycle.ack` 确认。`RuntimeLifecycleGate` 默认始终运行，只有收到合法的新 revision 才暂停昂贵帧；未协商、旧包、坏消息或回调异常都会安全恢复原网页执行。name-to-shop 用它跳过后台 tween、场景更新和渲染并暂停 Web Audio，恢复时不补跑积压帧；DOM UI、原版 Three.js 渲染和 JavaScript fallback 并未转写到 Unity。
+
 兼容方向是单向保守的：新版 Unity 包仍接受没有 `sessionId` 的旧版 Web 客户端；但使用会话隔离的新版 SDK 连接旧版 Unity 包时，不会接受缺少匹配 `sessionId` 的回复，也不会进入 Unity 权威状态，而是在握手超时后安全留在原 JavaScript 逻辑。要启用会话重建，应同时升级 Web SDK 和 Unity 包；旧客户端兼容不等于支持 `session-restart-v1`。
 
 这条链路转换的是已支持的运行时语义；任意 JavaScript 逻辑仍不能自动翻译为 C#，需要映射到现有 profile 或新增一个可复用的 SDK 适配器与 Unity 模块。
 
 ### 性能、背压与遥测
 
-Unity→Web 的管道写入由专用后台线程完成，不阻塞 Unity 的 `Update` / `FixedUpdate`。控制类消息进入有界可靠队列；`*.state` 之类的实时流按 `sessionId + 消息类型` 只保留最新值，WebView 暂时变慢时不会积累一长串已经过期的模拟帧，也不会让重连前后的状态互相覆盖。WebView Host 使用单一异步写入泵保证 Web→Unity 消息顺序，并把 Unity→Web 的 UI 投递按批次合并，两个方向都设有 1,024 条硬上限。内置逻辑模块还使用通用状态发送门：状态变化时立即发送，状态不变时抑制重复快照，并每 200ms 保留一次低频心跳以满足 500ms watchdog。Web→Unity 可复用 `RealtimeInputGate`，把渲染帧输入变成“数字边沿立即发送、模拟量限频、静止心跳”，并可合并保留单帧动作；Unity 端的 `ThreeUnityInputFreshnessGate` 会在心跳中断后清除旧的移动/跳跃状态，防止 WebView 卡住时角色持续失控。
+Unity→Web 的管道写入由专用后台线程完成，不阻塞 Unity 的 `Update` / `FixedUpdate`。控制类消息进入有界可靠队列；`*.state` 之类的实时流按 `sessionId + 消息类型` 只保留最新值。逻辑会话切换时会原子清除旧 owner 的可靠消息和 latest 状态；连续发送 32 条可靠消息后强制让出一次 latest 槽位，避免实时状态永久饿死。队列满表示可重试的 `backpressure`，只有连接退役时仍未送达的可靠消息才计入 `dropped`。
 
-Player 每 120 个物理帧输出一条 `THREE_UNITY_BRIDGE_PERF`，包含收发消息/字符数、合并数、可靠消息丢弃数、当前/历史最大积压，以及状态发送、抑制、心跳、会话重建和拒绝计数。Web 侧 `LogicClient.metrics` 提供对应的消息量、字符量、最新值合并、过期序列/异会话/终态尾包拒绝、协议错误、回退和重连计数。
+内置逻辑模块在序列化协议包时会把已知的 `type`、`sessionId` 与 JSON 一起排队，Bridge 不再为了判断 reliable/latest 和 stream key 而在 Unity 主线程反序列化自己刚生成的 JSON。只实现旧接口的第三方模块仍能使用，路由器会为它们保留一次兼容解析；`metadataFast` 与 `metadataFallback` 分别记录两条路径。每次 `FlushOutgoing` 最多接受 256 条消息，模块突发输出的余量保序留到后续 Unity 回调，避免一帧内把整条 1,024 容量队列搬满。
 
-`name-to-shop` 的同机实测中，静止商店跑到 240 个 Unity 物理帧时，Unity→Web 从 184 条 / 40,166 字符降到 20 条 / 4,262 字符，分别减少 89.1% 和 89.4%。LittleCubes 的 session-aware 240 FPS 输入基准把 Web→Unity 消息从 2,400 条降到 140 条（94.2%），协议字符减少 93.9%；真实 Player 的空闲输入由 180 条/秒降到约 4 条/秒，且 `dropped=0`。体素窗口复用使碰撞采样减少 90.8%，计入每条消息的 `sessionId` 后，`collision-delta-v2` 仍使协议字符减少 45.2%。Unity `6000.3.22f1` 的真实故障注入已分别验证两个 profile：LittleCubes 在输入失效后完成一次会话重建、新会话 ready 和后续逻辑 tick；name-to-shop 在 Web 请求回退后同样完成一次重建、新 ready 和后续 tick。两次运行都没有遗留孤儿 Host，性能标记均为 `dropped=0`。关闭 Player 后，嵌入式 WebView Host 在先前实测中于 140ms 内随父进程退出。测试方法、日志字段和扩展规则见 [`docs/BRIDGE_PERFORMANCE.md`](docs/BRIDGE_PERFORMANCE.md)。
+WebView Host 使用单一异步写入泵保证 Web→Unity 消息顺序，并把 Unity→Web 的 UI 投递按批次合并，两个方向都设有 1,024 条硬上限。页面导航完成只证明原站可显示；Unity→Web 消息必须同时等到当前 document 的 WebView listener ACK。新 document 会重置监听 latch，并忽略被重定向替代的旧导航 completion；hash/pushState 不创建 document，因此不会误触发 Host 重启。每个 Host 在创建 WebView2 子进程前先加入 Windows Job，退役时只有 Job 报告 `ActiveProcessCount=0` 才允许启动下一代，首次 `TerminateJobObject` 失败会节流重试。
+
+内置逻辑模块还使用通用状态发送门：状态变化时立即发送，状态不变时抑制重复快照，并每 200ms 保留一次低频心跳以满足 500ms watchdog。Web→Unity 可复用 `RealtimeInputGate`，把渲染帧输入变成“数字边沿立即发送、模拟量限频、静止心跳”，并可合并保留单帧动作；Unity 端的 `ThreeUnityInputFreshnessGate` 会在心跳中断后清除旧的移动/跳跃状态，防止 WebView 卡住时角色持续失控。
+
+Player 每 120 个物理帧输出一条 `THREE_UNITY_BRIDGE_PERF`，包含收发消息/字符数、合并数、可靠队列背压、实际丢失、owner 清理、公平调度、当前/历史最大积压，以及状态发送、抑制、心跳、会话重建、拒绝、元数据快路径、flush 预算和生命周期发送/确认计数。Web 侧 `LogicClient.metrics` 提供对应的消息量、字符量、最新值合并、过期序列/异会话/终态尾包拒绝、协议错误、回退和重连计数。
+
+`name-to-shop` 的同机实测中，静止商店跑到 240 个 Unity 物理帧时，Unity→Web 从 184 条 / 40,166 字符降到 20 条 / 4,262 字符，分别减少 89.1% 和 89.4%。出站分类基准对同一协议包重复 25,000 次：本轮头部解析用了 523,127 个 `Stopwatch` ticks，随包元数据只用了 6,124 ticks，并避免了全部 25,000 次解析。另一项确定性突发基准一次排队 4,096 条可靠消息，首轮只搬运 256 条、其余 3,840 条保序留存。重建后的实体 Player 报告 `metadataFast=21 metadataFallback=0 flushBudgetStops=0 maxFlush=2 lifecycleEmitted=2 lifecycleAck=2 lifecycleAckRejected=0`。LittleCubes 的 session-aware 240 FPS 输入基准把 Web→Unity 消息从 2,400 条降到 140 条（94.2%），协议字符减少 93.9%；真实 Player 的空闲输入由 180 条/秒降到约 4 条/秒，且 `dropped=0`。体素窗口复用使碰撞采样减少 90.8%，计入每条消息的 `sessionId` 后，`collision-delta-v2` 仍使协议字符减少 45.2%。Unity `6000.3.22f1` 的真实故障注入已分别验证两个 profile：LittleCubes 在输入失效后完成一次会话重建、新会话 ready 和后续逻辑 tick；name-to-shop 在 Web 请求回退后同样完成一次重建、新 ready、生命周期重新确认和后续 tick。两次运行都没有遗留孤儿 Host，性能标记均为 `dropped=0`。关闭 Player 后，嵌入式 WebView Host 在先前实测中于 140ms 内随父进程退出。测试方法、日志字段和扩展规则见 [`docs/BRIDGE_PERFORMANCE.md`](docs/BRIDGE_PERFORMANCE.md)。
 
 ## 把游戏语义传给 Unity
 

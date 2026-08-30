@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Collections.Concurrent;
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -187,11 +186,228 @@ public static class HostDiagnosticMarkers
     // and is never forwarded to the web page.
     public const string JobAssigned = "THREE_UNITY_HOST_JOB_ASSIGNED";
 
-    // This marker is written only after WebView2 reports a successful first
-    // navigation. Unity uses it to distinguish a merely connected pipe from a
-    // page that is actually ready, so repeated navigation failures retain the
-    // exponential restart backoff.
+    // This marker is written after WebView2 reports a successful first
+    // navigation. It deliberately does not require a bridge listener: an
+    // unchanged packaging-only page has no Unity-message consumer, but is still
+    // a successfully loaded page. Message dispatch has its own stricter gate.
     public const string PageReady = "THREE_UNITY_WEB_HOST_PAGE_READY";
+}
+
+public static class HostWebControlProtocol
+{
+    // Reserved Web -> Host string frame. The host consumes this exact JSON
+    // string and never forwards it to Unity. A page must send it only after its
+    // chrome.webview message listener has been installed.
+    public const string ListenerReady = "THREE_UNITY_WEB_LISTENER_READY";
+    public const string ListenerReadyJson = "\"" + ListenerReady + "\"";
+
+    public static bool IsListenerReady(string webMessageAsJson) =>
+        string.Equals(webMessageAsJson, ListenerReadyJson, StringComparison.Ordinal);
+}
+
+public readonly record struct WebReadinessTransition(
+    bool Accepted,
+    bool RetireHost,
+    bool ReportPageReady,
+    bool OpenDispatch);
+
+public sealed class WebPageReadinessCoordinator
+{
+    private readonly object sync = new();
+    private ulong? currentDocumentNavigationId;
+    private bool navigationReady;
+    private bool listenerReady;
+    private bool pageReadyReported;
+    private bool dispatchOpened;
+
+    public bool IsDispatchOpen
+    {
+        get { lock (sync) return dispatchOpened; }
+    }
+
+    public bool HasReportedPageReady
+    {
+        get { lock (sync) return pageReadyReported; }
+    }
+
+    public ulong? CurrentDocumentNavigationId
+    {
+        get { lock (sync) return currentDocumentNavigationId; }
+    }
+
+    /// <summary>
+    /// Starts a new top-level document epoch. ContentLoading is deliberately
+    /// used instead of NavigationStarting because same-document hash/history
+    /// navigations do not create a new JavaScript listener lifetime.
+    /// </summary>
+    public WebReadinessTransition BeginDocument(ulong navigationId)
+    {
+        lock (sync)
+        {
+            if (currentDocumentNavigationId == navigationId)
+                return new WebReadinessTransition(true, false, false, false);
+
+            // Once Unity has accepted a physical page generation, a fresh
+            // document must receive a fresh Host/page generation as well.
+            if (pageReadyReported)
+                return new WebReadinessTransition(false, true, false, false);
+
+            currentDocumentNavigationId = navigationId;
+            navigationReady = false;
+            listenerReady = false;
+            dispatchOpened = false;
+            return new WebReadinessTransition(true, false, false, false);
+        }
+    }
+
+    public bool IsCurrentDocument(ulong navigationId)
+    {
+        lock (sync)
+            return currentDocumentNavigationId == navigationId;
+    }
+
+    public WebReadinessTransition MarkNavigationReady(ulong navigationId)
+    {
+        lock (sync)
+        {
+            // A superseded navigation can complete after the replacement
+            // document has reached ContentLoading. It must not ready or fail the
+            // replacement document.
+            if (currentDocumentNavigationId != navigationId)
+                return default;
+
+            navigationReady = true;
+            var reportPageReady = !pageReadyReported;
+            if (reportPageReady)
+                pageReadyReported = true;
+
+            var openDispatch = !dispatchOpened && navigationReady && listenerReady;
+            if (openDispatch)
+                dispatchOpened = true;
+
+            return new WebReadinessTransition(true, false, reportPageReady, openDispatch);
+        }
+    }
+
+    public WebReadinessTransition MarkListenerReady()
+    {
+        lock (sync)
+        {
+            // JavaScript cannot legitimately acknowledge a listener before a
+            // document has entered ContentLoading. Ignore such stale/control
+            // traffic instead of letting it prime the next document.
+            if (!currentDocumentNavigationId.HasValue)
+                return default;
+
+            listenerReady = true;
+            var openDispatch = !dispatchOpened && navigationReady;
+            if (openDispatch)
+                dispatchOpened = true;
+            return new WebReadinessTransition(true, false, false, openDispatch);
+        }
+    }
+}
+
+public sealed class BoundedHostMessageQueue<T>
+{
+    private readonly object sync = new();
+    private readonly Queue<T> messages = new();
+    private readonly int capacity;
+
+    public BoundedHostMessageQueue(int capacity)
+    {
+        if (capacity <= 0)
+            throw new ArgumentOutOfRangeException(nameof(capacity));
+        this.capacity = capacity;
+    }
+
+    public int Count
+    {
+        get { lock (sync) return messages.Count; }
+    }
+
+    public bool TryEnqueue(T message)
+    {
+        lock (sync)
+        {
+            if (messages.Count >= capacity)
+                return false;
+            messages.Enqueue(message);
+            return true;
+        }
+    }
+
+    public bool TryDequeue(out T message)
+    {
+        lock (sync)
+        {
+            if (messages.Count == 0)
+            {
+                message = default!;
+                return false;
+            }
+            message = messages.Dequeue();
+            return true;
+        }
+    }
+
+    public int Clear()
+    {
+        lock (sync)
+        {
+            var removed = messages.Count;
+            messages.Clear();
+            return removed;
+        }
+    }
+}
+
+public static class HostTestHooks
+{
+    public const string DelayAfterConnectMillisecondsVariable =
+        "THREE_UNITY_WEB_HOST_TEST_DELAY_AFTER_CONNECT_MS";
+    public const string DelayAfterConnectOnceFileVariable =
+        "THREE_UNITY_WEB_HOST_TEST_DELAY_AFTER_CONNECT_ONCE_FILE";
+    private const int MaximumDelayMilliseconds = 60_000;
+
+    public static TimeSpan ClaimDelayAfterConnectFromEnvironment() => ClaimDelayAfterConnect(
+        Environment.GetEnvironmentVariable(DelayAfterConnectMillisecondsVariable),
+        Environment.GetEnvironmentVariable(DelayAfterConnectOnceFileVariable));
+
+    public static TimeSpan ClaimDelayAfterConnect(string? millisecondsValue, string? onceFile)
+    {
+        // Both variables are required so an accidentally inherited single test
+        // variable has no effect on production launches.
+        if (string.IsNullOrWhiteSpace(millisecondsValue) || string.IsNullOrWhiteSpace(onceFile))
+            return TimeSpan.Zero;
+        if (!int.TryParse(millisecondsValue, out var milliseconds)
+            || milliseconds <= 0
+            || milliseconds > MaximumDelayMilliseconds)
+            throw new ArgumentOutOfRangeException(
+                nameof(millisecondsValue),
+                $"The test delay must be between 1 and {MaximumDelayMilliseconds} milliseconds.");
+
+        var markerPath = Path.GetFullPath(onceFile);
+        try
+        {
+            using var marker = new FileStream(
+                markerPath,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.Read,
+                bufferSize: 64,
+                FileOptions.WriteThrough);
+            var owner = Encoding.UTF8.GetBytes(Environment.ProcessId.ToString());
+            marker.Write(owner);
+            marker.Flush(flushToDisk: true);
+            return TimeSpan.FromMilliseconds(milliseconds);
+        }
+        catch (IOException) when (File.Exists(markerPath))
+        {
+            // Another Host generation already owns the one-shot delay.
+            return TimeSpan.Zero;
+        }
+    }
 }
 
 public sealed class HostJobAssignmentGate
@@ -236,9 +452,10 @@ internal sealed class BridgeForm : Form
             SingleWriter = true,
             FullMode = BoundedChannelFullMode.Wait,
         });
-    private readonly ConcurrentQueue<string> messagesToWebView = new();
+    private readonly BoundedHostMessageQueue<string> messagesToWebView = new(MaxPendingMessages);
     private readonly TerminalFaultGate terminalFault = new();
     private readonly HostJobAssignmentGate hostJobAssignment = new();
+    private readonly WebPageReadinessCoordinator pageReadiness = new();
     private Process? parent;
     private IntPtr parentWindow;
     private NamedPipeClientStream? pipe;
@@ -247,11 +464,10 @@ internal sealed class BridgeForm : Form
     private Thread? parentWatchThread;
     private Task? pipeReaderTask;
     private Task? pipeWriterTask;
-    private int pendingWebViewMessages;
     private int webViewDispatchScheduled;
     private int bridgeDisconnected;
     private int bridgeDisposed;
-    private int pageReadyReported;
+    private int closeScheduled;
 
     public BridgeForm(HostOptions options)
     {
@@ -288,6 +504,10 @@ internal sealed class BridgeForm : Form
                 return;
             }
 
+            var testDelay = HostTestHooks.ClaimDelayAfterConnectFromEnvironment();
+            if (testDelay > TimeSpan.Zero)
+                await Task.Delay(testDelay, bridgeCancellation.Token);
+
             parentWindow = await WaitForWindow(parent);
             AttachToParent();
             parentTimer.Start();
@@ -304,7 +524,7 @@ internal sealed class BridgeForm : Form
             webView.CoreWebView2.Settings.IsStatusBarEnabled = false;
             webView.CoreWebView2.WebMessageReceived += OnWebMessage;
             webView.CoreWebView2.ProcessFailed += OnWebViewProcessFailed;
-            webView.CoreWebView2.NavigationStarting += OnNavigationStarting;
+            webView.CoreWebView2.ContentLoading += OnContentLoading;
             webView.CoreWebView2.NavigationCompleted += OnNavigationCompleted;
             webView.CoreWebView2.SetVirtualHostNameToFolderMapping(
                 identity.VirtualHostName,
@@ -345,7 +565,7 @@ internal sealed class BridgeForm : Form
             Thread.Sleep(250);
         }
         if (Volatile.Read(ref bridgeDisposed) == 0)
-            Environment.Exit(0);
+            CloseOnUiThread();
     }
 
     private void AttachToParent()
@@ -361,7 +581,7 @@ internal sealed class BridgeForm : Form
     {
         if (parent == null || parent.HasExited)
         {
-            Close();
+            CloseOnUiThread();
             return;
         }
         if (GetClientRect(parentWindow, out var rect))
@@ -394,13 +614,12 @@ internal sealed class BridgeForm : Form
                 if (hostJobAssignment.TryAccept(message))
                     continue;
 
-                messagesToWebView.Enqueue(message);
-                if (Interlocked.Increment(ref pendingWebViewMessages) > MaxPendingMessages)
+                if (!messagesToWebView.TryEnqueue(message))
                 {
                     ConvergeTerminalFault("unity-to-web-overflow");
                     return;
                 }
-                if (Volatile.Read(ref pageReadyReported) != 0)
+                if (pageReadiness.IsDispatchOpen)
                     ScheduleWebViewDispatch();
             }
         }
@@ -433,35 +652,50 @@ internal sealed class BridgeForm : Form
     private void OnWebMessage(object? sender, CoreWebView2WebMessageReceivedEventArgs args)
     {
         if (Volatile.Read(ref bridgeDisconnected) != 0) return;
-        if (!messagesToUnity.Writer.TryWrite(args.WebMessageAsJson))
+        var webMessageAsJson = args.WebMessageAsJson;
+        if (HostWebControlProtocol.IsListenerReady(webMessageAsJson))
+        {
+            if (pageReadiness.MarkListenerReady().OpenDispatch)
+                ScheduleWebViewDispatch();
+            return;
+        }
+        if (!messagesToUnity.Writer.TryWrite(webMessageAsJson))
             ConvergeTerminalFault("web-to-unity-overflow");
     }
 
     private void OnWebViewProcessFailed(object? sender, CoreWebView2ProcessFailedEventArgs args) =>
         ConvergeTerminalFault($"webview-process-failed:{args.ProcessFailedKind}");
 
-    private void OnNavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs args)
+    private void OnContentLoading(object? sender, CoreWebView2ContentLoadingEventArgs args)
     {
-        // A hard reload creates a fresh JavaScript session while Unity still owns
-        // the old physical page generation. Retire the whole Host so the launcher
-        // increments that generation instead of allowing cross-session delivery.
-        if (Volatile.Read(ref pageReadyReported) != 0)
-            ConvergeTerminalFault("navigation-after-page-ready");
+        if (Volatile.Read(ref bridgeDisconnected) != 0)
+            return;
+
+        var transition = pageReadiness.BeginDocument(args.NavigationId);
+        if (transition.RetireHost)
+            ConvergeTerminalFault("document-after-page-ready");
     }
 
     private void OnNavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs args)
     {
+        if (Volatile.Read(ref bridgeDisconnected) != 0
+            || !pageReadiness.IsCurrentDocument(args.NavigationId))
+            return;
+
         if (!args.IsSuccess)
         {
             ConvergeTerminalFault($"navigation-failed:{args.WebErrorStatus}");
             return;
         }
 
-        if (Interlocked.Exchange(ref pageReadyReported, 1) == 0)
+        var transition = pageReadiness.MarkNavigationReady(args.NavigationId);
+        if (transition.ReportPageReady)
         {
             Console.Error.WriteLine(HostDiagnosticMarkers.PageReady);
-            ScheduleWebViewDispatch();
+            Console.Error.Flush();
         }
+        if (transition.OpenDispatch)
+            ScheduleWebViewDispatch();
     }
 
     private void ScheduleWebViewDispatch()
@@ -471,6 +705,7 @@ internal sealed class BridgeForm : Form
         if (Interlocked.CompareExchange(ref webViewDispatchScheduled, 1, 0) != 0)
             return;
         try { BeginInvoke((Action)DrainWebViewMessages); }
+        catch (ObjectDisposedException) { Volatile.Write(ref webViewDispatchScheduled, 0); }
         catch (InvalidOperationException) { Volatile.Write(ref webViewDispatchScheduled, 0); }
     }
 
@@ -478,18 +713,49 @@ internal sealed class BridgeForm : Form
     {
         if (IsDisposed
             || Volatile.Read(ref bridgeDisconnected) != 0
-            || Volatile.Read(ref pageReadyReported) == 0
-            || webView.CoreWebView2 == null)
+            || !pageReadiness.IsDispatchOpen)
         {
             Volatile.Write(ref webViewDispatchScheduled, 0);
+            return;
+        }
+
+        CoreWebView2? core;
+        try { core = webView.CoreWebView2; }
+        catch (ObjectDisposedException exception)
+        {
+            ConvergeTerminalFault("webview-message-dispatch-failed", exception);
+            return;
+        }
+        catch (COMException exception)
+        {
+            ConvergeTerminalFault("webview-message-dispatch-failed", exception);
+            return;
+        }
+        catch (InvalidOperationException exception)
+        {
+            ConvergeTerminalFault("webview-message-dispatch-failed", exception);
+            return;
+        }
+        if (core == null)
+        {
+            ConvergeTerminalFault("webview-message-dispatch-failed");
             return;
         }
 
         var dispatched = 0;
         while (dispatched++ < MaxWebViewMessagesPerDispatch && messagesToWebView.TryDequeue(out var message))
         {
-            Interlocked.Decrement(ref pendingWebViewMessages);
-            try { webView.CoreWebView2.PostWebMessageAsString(message); }
+            try { core.PostWebMessageAsString(message); }
+            catch (ObjectDisposedException exception)
+            {
+                ConvergeTerminalFault("webview-message-dispatch-failed", exception);
+                return;
+            }
+            catch (COMException exception)
+            {
+                ConvergeTerminalFault("webview-message-dispatch-failed", exception);
+                return;
+            }
             catch (InvalidOperationException exception)
             {
                 ConvergeTerminalFault("webview-message-dispatch-failed", exception);
@@ -497,15 +763,16 @@ internal sealed class BridgeForm : Form
             }
         }
 
-        if (!messagesToWebView.IsEmpty)
+        if (messagesToWebView.Count != 0)
         {
             try { BeginInvoke((Action)DrainWebViewMessages); }
+            catch (ObjectDisposedException) { Volatile.Write(ref webViewDispatchScheduled, 0); }
             catch (InvalidOperationException) { Volatile.Write(ref webViewDispatchScheduled, 0); }
             return;
         }
 
         Volatile.Write(ref webViewDispatchScheduled, 0);
-        if (!messagesToWebView.IsEmpty)
+        if (messagesToWebView.Count != 0)
             ScheduleWebViewDispatch();
     }
 
@@ -518,8 +785,7 @@ internal sealed class BridgeForm : Form
         bridgeCancellation.Cancel();
         try { pipe?.Dispose(); }
         catch (ObjectDisposedException) { }
-        while (messagesToWebView.TryDequeue(out _))
-            Interlocked.Decrement(ref pendingWebViewMessages);
+        messagesToWebView.Clear();
     }
 
     private void ConvergeTerminalFault(string reason, Exception? exception = null)
@@ -556,13 +822,14 @@ internal sealed class BridgeForm : Form
         {
             if (IsDisposed || Disposing)
                 return;
-            if (InvokeRequired)
-                BeginInvoke((Action)CloseIfAlive);
-            else
-                CloseIfAlive();
+            if (Interlocked.CompareExchange(ref closeScheduled, 1, 0) != 0)
+                return;
+            // Always leave the current WebView/pipe callback stack before the
+            // Form and CoreWebView2 are disposed.
+            BeginInvoke((Action)CloseIfAlive);
         }
-        catch (ObjectDisposedException) { }
-        catch (InvalidOperationException) { }
+        catch (ObjectDisposedException) { Volatile.Write(ref closeScheduled, 0); }
+        catch (InvalidOperationException) { Volatile.Write(ref closeScheduled, 0); }
     }
 
     private void DisposeBridge()
@@ -570,20 +837,43 @@ internal sealed class BridgeForm : Form
         if (Interlocked.Exchange(ref bridgeDisposed, 1) != 0)
             return;
         parentTimer.Stop();
-        if (webView.CoreWebView2 != null)
+        CoreWebView2? core = null;
+        try { core = webView.CoreWebView2; }
+        catch (ObjectDisposedException) { }
+        catch (COMException) { }
+        catch (InvalidOperationException) { }
+        if (core != null)
         {
-            webView.CoreWebView2.WebMessageReceived -= OnWebMessage;
-            webView.CoreWebView2.ProcessFailed -= OnWebViewProcessFailed;
-            webView.CoreWebView2.NavigationCompleted -= OnNavigationCompleted;
+            try { core.WebMessageReceived -= OnWebMessage; }
+            catch (ObjectDisposedException) { }
+            catch (COMException) { }
+            catch (InvalidOperationException) { }
+            try { core.ProcessFailed -= OnWebViewProcessFailed; }
+            catch (ObjectDisposedException) { }
+            catch (COMException) { }
+            catch (InvalidOperationException) { }
+            try { core.ContentLoading -= OnContentLoading; }
+            catch (ObjectDisposedException) { }
+            catch (COMException) { }
+            catch (InvalidOperationException) { }
+            try { core.NavigationCompleted -= OnNavigationCompleted; }
+            catch (ObjectDisposedException) { }
+            catch (COMException) { }
+            catch (InvalidOperationException) { }
         }
-        DisconnectBridge("host-disposed");
-        pipeReader?.Dispose();
-        pipeWriter?.Dispose();
-        pipe?.Dispose();
+        try { DisconnectBridge("host-disposed"); }
+        catch (Exception) { }
+        try { pipeReader?.Dispose(); }
+        catch (Exception) { }
+        try { pipeWriter?.Dispose(); }
+        catch (Exception) { }
+        try { pipe?.Dispose(); }
+        catch (Exception) { }
         parentWatchThread = null;
         pipeReaderTask = null;
         pipeWriterTask = null;
-        webView.Dispose();
+        try { webView.Dispose(); }
+        catch (Exception) { }
     }
 
     [StructLayout(LayoutKind.Sequential)]

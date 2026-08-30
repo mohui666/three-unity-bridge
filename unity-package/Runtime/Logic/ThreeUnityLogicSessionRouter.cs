@@ -31,6 +31,29 @@ namespace ThreeUnity.Bridge.Logic
         private sealed class SessionTransitionPayload
         {
             public string previousSessionId;
+            public string[] capabilities;
+        }
+
+        [Serializable]
+        private sealed class RuntimeLifecyclePayload
+        {
+            public bool focused;
+            public bool paused;
+            public bool active;
+            public long revision;
+        }
+
+        [Serializable]
+        private sealed class RuntimeLifecycleAckMessage
+        {
+            public RuntimeLifecycleAckPayload payload;
+        }
+
+        [Serializable]
+        private sealed class RuntimeLifecycleAckPayload
+        {
+            public long revision;
+            public bool active;
         }
 
         private readonly string profile;
@@ -49,6 +72,8 @@ namespace ThreeUnity.Bridge.Logic
         private long sessionRejected;
         private long sequenceRejected;
         private long retiredOutgoingDiscarded;
+        private long outgoingMetadataFastPath;
+        private long outgoingMetadataFallbackParses;
         private long retiredStateEmitted;
         private long retiredStateSuppressed;
         private long retiredStateHeartbeats;
@@ -60,6 +85,21 @@ namespace ThreeUnity.Bridge.Logic
         private long retiredInputExpired;
         private long retiredInputRecovered;
         private long retiredInputNeutralized;
+        private bool applicationFocused = true;
+        private bool applicationPaused;
+        private long applicationLifecycleRevision;
+        private bool lifecycleNegotiated;
+        private bool lifecycleReadyBarrier;
+        private bool hasPendingLifecycle;
+        private ThreeUnityLogicOutgoingMessage pendingLifecycle;
+        private readonly Dictionary<long, bool> emittedLifecycleStates = new Dictionary<long, bool>();
+        private readonly Queue<long> emittedLifecycleOrder = new Queue<long>();
+        private long lifecycleSequence;
+        private long lifecycleChanges;
+        private long lifecycleEmitted;
+        private long lifecycleCoalesced;
+        private long lifecycleAcknowledged;
+        private long lifecycleAckRejected;
 
         public ThreeUnityLogicSessionRouter(
             string profile,
@@ -85,6 +125,46 @@ namespace ThreeUnity.Bridge.Logic
         public long SessionRejected => sessionRejected;
         public long SequenceRejected => sequenceRejected;
         public long RetiredOutgoingDiscarded => retiredOutgoingDiscarded;
+        public long OutgoingMetadataFastPath => outgoingMetadataFastPath;
+        public long OutgoingMetadataFallbackParses => outgoingMetadataFallbackParses;
+        public bool ApplicationFocused => applicationFocused;
+        public bool ApplicationPaused => applicationPaused;
+        public bool ApplicationActive => applicationFocused && !applicationPaused;
+        public long ApplicationLifecycleRevision => applicationLifecycleRevision;
+        public long LifecycleChanges => lifecycleChanges;
+        public long LifecycleEmitted => lifecycleEmitted;
+        public long LifecycleCoalesced => lifecycleCoalesced;
+        public long LifecycleAcknowledged => lifecycleAcknowledged;
+        public long LifecycleAckRejected => lifecycleAckRejected;
+
+        /// <summary>
+        /// Updates Unity Player lifecycle state. The latest state is coalesced per
+        /// logical session and is emitted only after that session's bridge.ready.
+        /// </summary>
+        public bool SetApplicationLifecycle(bool focused, bool paused)
+        {
+            ThrowIfDisposed();
+            if (applicationFocused == focused && applicationPaused == paused)
+                return false;
+
+            applicationFocused = focused;
+            applicationPaused = paused;
+            applicationLifecycleRevision++;
+            lifecycleChanges++;
+            if (lifecycleNegotiated)
+                QueueLifecycleState();
+            return true;
+        }
+
+        /// <summary>
+        /// Accounts for an envelope already dequeued from the module but retained
+        /// by the transport retry head when its logical or physical owner retires.
+        /// </summary>
+        internal void RecordRetainedOutgoingDiscarded()
+        {
+            ThrowIfDisposed();
+            retiredOutgoingDiscarded++;
+        }
 
         public ThreeUnityLogicRouteResult Handle(string json, LogicEnvelopeHeader header)
         {
@@ -130,7 +210,14 @@ namespace ThreeUnity.Bridge.Logic
 
             if (!AcceptSequence(header))
                 return RejectSequence();
+            if (string.Equals(header.type, "runtime.lifecycle.ack", StringComparison.Ordinal))
+            {
+                HandleLifecycleAck(json);
+                return ThreeUnityLogicRouteResult.Handled;
+            }
             module.Handle(json, header);
+            if (module.IsFallback)
+                DisableLifecycle(true);
             return ThreeUnityLogicRouteResult.Handled;
         }
 
@@ -173,6 +260,7 @@ namespace ThreeUnity.Bridge.Logic
             awaitingScopedHello = false;
             legacyHandled = false;
             receivedSequences.Clear();
+            ResetLifecycleSession(true);
             transportResets++;
             Retire(retired);
             return true;
@@ -188,18 +276,59 @@ namespace ThreeUnity.Bridge.Logic
 
         public bool TryDequeueOutgoing(out string json)
         {
-            if (disposed || module == null)
+            if (!TryDequeueOutgoingMessage(out var message))
             {
                 json = null;
                 return false;
             }
-            return module.TryDequeueOutgoing(out json);
+            json = message.Json;
+            return true;
+        }
+
+        /// <summary>
+        /// Uses producer-supplied type/session metadata when available. Custom
+        /// legacy modules retain the original string contract and are parsed once
+        /// here solely for transport classification.
+        /// </summary>
+        public bool TryDequeueOutgoingMessage(out ThreeUnityLogicOutgoingMessage message)
+        {
+            if (disposed || module == null)
+            {
+                message = default;
+                return false;
+            }
+
+            if (module.IsFallback)
+                DisableLifecycle(true);
+
+            if (lifecycleReadyBarrier)
+            {
+                if (!TryDequeueModuleOutgoingMessage(out message))
+                    return false;
+                if (string.Equals(message.Type, "bridge.ready", StringComparison.Ordinal))
+                    lifecycleReadyBarrier = false;
+                return true;
+            }
+
+            if (hasPendingLifecycle)
+            {
+                message = pendingLifecycle;
+                hasPendingLifecycle = false;
+                pendingLifecycle = default;
+                outgoingMetadataFastPath++;
+                lifecycleEmitted++;
+                RecordLifecycleEmission(applicationLifecycleRevision, ApplicationActive);
+                return true;
+            }
+
+            return TryDequeueModuleOutgoingMessage(out message);
         }
 
         public void ForceFallback(string reason)
         {
             if (disposed || module == null)
                 return;
+            DisableLifecycle(true);
             module.ForceFallback(reason);
         }
 
@@ -248,6 +377,7 @@ namespace ThreeUnity.Bridge.Logic
             if (disposed)
                 return;
             disposed = true;
+            ResetLifecycleSession(true);
             Retire(module);
             module = null;
             receivedSequences.Clear();
@@ -266,6 +396,7 @@ namespace ThreeUnity.Bridge.Logic
                 if (!AcceptSequence(header))
                     return RejectSequence();
                 module.Handle(json, header);
+                DisableLifecycle(true);
                 return ThreeUnityLogicRouteResult.Handled;
             }
 
@@ -304,6 +435,7 @@ namespace ThreeUnity.Bridge.Logic
                 return RejectSequence();
             awaitingScopedHello = false;
             module.Handle(json, header);
+            ConfigureLifecycleForHello(json);
             return restarted ? ThreeUnityLogicRouteResult.Restarted : ThreeUnityLogicRouteResult.Handled;
         }
 
@@ -347,7 +479,175 @@ namespace ThreeUnity.Bridge.Logic
             awaitingScopedHello = true;
             legacyHandled = false;
             receivedSequences.Clear();
+            ResetLifecycleSession(true);
             Retire(retired);
+        }
+
+        private bool TryDequeueModuleOutgoingMessage(out ThreeUnityLogicOutgoingMessage message)
+        {
+            if (module is IThreeUnityLogicOutgoingMetadata metadata)
+            {
+                if (!metadata.TryDequeueOutgoingMessage(out message))
+                    return false;
+                outgoingMetadataFastPath++;
+                return true;
+            }
+
+            if (!module.TryDequeueOutgoing(out var json))
+            {
+                message = default;
+                return false;
+            }
+
+            outgoingMetadataFallbackParses++;
+            if (LogicEnvelopeParser.TryParseHeader(json, out var header, out _))
+            {
+                message = new ThreeUnityLogicOutgoingMessage(
+                    json,
+                    header.type,
+                    header.sessionId);
+            }
+            else
+            {
+                // Preserve the old behavior for malformed third-party output:
+                // it remains reliable transport traffic rather than disappearing.
+                message = new ThreeUnityLogicOutgoingMessage(json, null, null);
+            }
+            return true;
+        }
+
+        private void ConfigureLifecycleForHello(string json)
+        {
+            if (module == null || module.IsFallback || !HelloSupportsLifecycle(json))
+            {
+                DisableLifecycle(true);
+                return;
+            }
+
+            lifecycleNegotiated = true;
+            lifecycleReadyBarrier = true;
+            QueueLifecycleState();
+        }
+
+        private void QueueLifecycleState()
+        {
+            if (!lifecycleNegotiated || string.IsNullOrEmpty(activeSessionId))
+                return;
+            if (hasPendingLifecycle)
+                lifecycleCoalesced++;
+            pendingLifecycle = LogicEnvelopeWriter.EncodeMessage(
+                "runtime.lifecycle.state",
+                lifecycleSequence++,
+                activeSessionId,
+                new RuntimeLifecyclePayload
+                {
+                    focused = applicationFocused,
+                    paused = applicationPaused,
+                    active = ApplicationActive,
+                    revision = applicationLifecycleRevision,
+                });
+            hasPendingLifecycle = true;
+        }
+
+        private void HandleLifecycleAck(string json)
+        {
+            if (!lifecycleNegotiated
+                || !TryReadLifecycleAck(json, out var revision, out var active)
+                || !emittedLifecycleStates.TryGetValue(revision, out var expectedActive)
+                || active != expectedActive)
+            {
+                lifecycleAckRejected++;
+                return;
+            }
+            emittedLifecycleStates.Remove(revision);
+            lifecycleAcknowledged++;
+        }
+
+        private void RecordLifecycleEmission(long revision, bool active)
+        {
+            const int maxTrackedEmissions = 64;
+            while (emittedLifecycleOrder.Count >= maxTrackedEmissions)
+            {
+                var retiredRevision = emittedLifecycleOrder.Dequeue();
+                emittedLifecycleStates.Remove(retiredRevision);
+            }
+            emittedLifecycleOrder.Enqueue(revision);
+            emittedLifecycleStates[revision] = active;
+        }
+
+        private void DisableLifecycle(bool countPendingAsDiscarded)
+        {
+            if (hasPendingLifecycle && countPendingAsDiscarded)
+                retiredOutgoingDiscarded++;
+            lifecycleNegotiated = false;
+            lifecycleReadyBarrier = false;
+            hasPendingLifecycle = false;
+            pendingLifecycle = default;
+        }
+
+        private void ResetLifecycleSession(bool countPendingAsDiscarded)
+        {
+            DisableLifecycle(countPendingAsDiscarded);
+            lifecycleSequence = 0;
+            emittedLifecycleStates.Clear();
+            emittedLifecycleOrder.Clear();
+        }
+
+        private static bool HelloSupportsLifecycle(string json)
+        {
+            try
+            {
+                var capabilities = JsonUtility.FromJson<SessionTransitionMessage>(json)?.payload?.capabilities;
+                return capabilities != null
+                    && Array.IndexOf(capabilities, ThreeUnityLogicFeatures.RuntimeLifecycle) >= 0;
+            }
+            catch (ArgumentException)
+            {
+                return false;
+            }
+        }
+
+        private static bool TryReadLifecycleAck(string json, out long revision, out bool active)
+        {
+            revision = -1;
+            active = false;
+            try
+            {
+                var payload = JsonUtility.FromJson<RuntimeLifecycleAckMessage>(json)?.payload;
+                if (payload == null
+                    || payload.revision < 0
+                    || !HasJsonProperty(json, "revision")
+                    || !HasJsonBooleanProperty(json, "active", payload.active))
+                    return false;
+                revision = payload.revision;
+                active = payload.active;
+                return true;
+            }
+            catch (ArgumentException)
+            {
+                return false;
+            }
+        }
+
+        private static bool HasJsonProperty(string json, string propertyName)
+        {
+            return json.IndexOf("\"" + propertyName + "\"", StringComparison.Ordinal) >= 0;
+        }
+
+        private static bool HasJsonBooleanProperty(string json, string propertyName, bool expected)
+        {
+            var propertyIndex = json.IndexOf("\"" + propertyName + "\"", StringComparison.Ordinal);
+            if (propertyIndex < 0)
+                return false;
+            var colon = json.IndexOf(':', propertyIndex + propertyName.Length + 2);
+            if (colon < 0)
+                return false;
+            var valueIndex = colon + 1;
+            while (valueIndex < json.Length && char.IsWhiteSpace(json[valueIndex]))
+                valueIndex++;
+            var token = expected ? "true" : "false";
+            return valueIndex + token.Length <= json.Length
+                && string.CompareOrdinal(json, valueIndex, token, 0, token.Length) == 0;
         }
 
         private void Retire(IThreeUnityLogicModule retired)

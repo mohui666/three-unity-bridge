@@ -155,6 +155,31 @@ namespace ThreeUnity.Bridge.Tests
             Assert.That(telemetry.Heartbeats, Is.EqualTo(1));
         }
 
+        [Test]
+        public void BuiltInModuleCarriesSessionAndTypeMetadataBesideSerializedOutput()
+        {
+            var module = new ShopFlightLogicModule();
+            var metadata = (IThreeUnityLogicOutgoingMetadata)module;
+            Handle(module, "{\"protocol\":1,\"sessionId\":\"metadata-session\",\"type\":\"bridge.hello\",\"seq\":0,\"payload\":{\"gameId\":\"test-game\",\"capabilities\":[\"shop-flight-v1\"]}}");
+
+            Assert.That(metadata.TryDequeueOutgoingMessage(out var ready), Is.True);
+            Assert.That(ready.Type, Is.EqualTo("bridge.ready"));
+            Assert.That(ready.SessionId, Is.EqualTo("metadata-session"));
+            Assert.That(ready.IsLatestState, Is.False);
+            Assert.That(ready.StreamKey, Is.Null);
+            StringAssert.Contains("\"type\":\"bridge.ready\"", ready.Json);
+
+            Handle(module, "{\"protocol\":1,\"sessionId\":\"metadata-session\",\"type\":\"flight.bootstrap\",\"seq\":1,\"payload\":{\"generation\":1,\"time\":0,\"amplitude\":0,\"flying\":false}}");
+            module.FixedTick(0.02f);
+
+            Assert.That(metadata.TryDequeueOutgoingMessage(out var state), Is.True);
+            Assert.That(state.Type, Is.EqualTo("flight.state"));
+            Assert.That(state.SessionId, Is.EqualTo("metadata-session"));
+            Assert.That(state.IsLatestState, Is.True);
+            Assert.That(state.StreamKey, Is.EqualTo("metadata-session:flight.state"));
+            StringAssert.Contains("\"type\":\"flight.state\"", state.Json);
+        }
+
         private static void Handle(IThreeUnityLogicModule module, string json)
         {
             Assert.That(LogicEnvelopeParser.TryParseHeader(json, out var header, out var error), Is.True, error);

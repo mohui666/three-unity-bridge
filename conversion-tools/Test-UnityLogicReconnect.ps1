@@ -20,6 +20,13 @@ param(
     [ValidateRange(10500, 60000)]
     [int] $HangMilliseconds = 11500,
 
+    [Parameter(Mandatory = $true, ParameterSetName = 'HangAfterConnect')]
+    [switch] $HangAfterConnect,
+
+    [Parameter(ParameterSetName = 'HangAfterConnect')]
+    [ValidateRange(20500, 60000)]
+    [int] $PageReadyHangMilliseconds = 21500,
+
     [ValidateRange(1, 600)]
     [int] $StartupTimeoutSeconds = 30,
 
@@ -42,7 +49,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:FailurePattern = '(?m)^(?:.*THREE_UNITY_LOGIC_PROTOCOL_ERROR.*|.*THREE_UNITY_WEB_BRIDGE_RELIABLE_OVERFLOW.*|.*THREE_UNITY_WEB_BRIDGE_INBOUND_OVERFLOW.*|.*THREE_UNITY_WEB_BRIDGE_HOST_CLEANUP_TIMEOUT.*|.*THREE_UNITY_WEB_HOST_DIAGNOSTIC.*THREE_UNITY_WEB_HOST_FATAL.*|Crash!!!|Unhandled Exception:.*|.*Native Crash Reporting.*)$'
+$script:FailurePattern = '(?m)^(?:.*THREE_UNITY_LOGIC_PROTOCOL_ERROR.*|.*THREE_UNITY_WEB_BRIDGE_RELIABLE_(?:BACKPRESSURE|OVERFLOW).*|.*THREE_UNITY_WEB_BRIDGE_INBOUND_OVERFLOW.*|.*THREE_UNITY_WEB_BRIDGE_HOST_CLEANUP_TIMEOUT.*|.*THREE_UNITY_WEB_HOST_DIAGNOSTIC.*THREE_UNITY_WEB_HOST_FATAL.*|Crash!!!|Unhandled Exception:.*|.*Native Crash Reporting.*)$'
 $script:PreConnectEvidencePattern = '(?m)^.*(?:THREE_UNITY_WEB_BRIDGE_CONNECTED|THREE_UNITY_WEB_BRIDGE_PAGE_READY|THREE_UNITY_LOGIC_READY)\b.*$'
 $script:ConnectTimeoutPattern = '(?m)^.*THREE_UNITY_WEB_BRIDGE_DISCONNECTED\b(?=[^\n]*\breason=connect-timeout\b)[^\n]*'
 $script:MaxConcurrentHostsObserved = 0
@@ -194,6 +201,27 @@ function Wait-ForCurrentRunLog {
         Start-Sleep -Milliseconds 100
     }
     throw "Timed out after $TimeoutSeconds seconds waiting for current-run log: $Path"
+}
+
+function Wait-ForOneShotMarker {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][System.Diagnostics.Process] $Player,
+        [Parameter(Mandatory = $true)][int] $TimeoutSeconds
+    )
+
+    $deadline = [datetime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ([datetime]::UtcNow -lt $deadline) {
+        if (Test-ProcessExited $Player) {
+            throw "Unity Player exited before the Host consumed its one-shot delay marker (exit code $($Player.ExitCode))."
+        }
+        [void] (Get-AtMostOneExactChildHost -PlayerId $Player.Id)
+        if ([System.IO.File]::Exists($Path)) {
+            return
+        }
+        Start-Sleep -Milliseconds 25
+    }
+    throw "Host did not consume the one-shot post-connect delay gate: $Path"
 }
 
 function Wait-ForLogEvent {
@@ -428,6 +456,9 @@ if ([string]::IsNullOrWhiteSpace($logDirectory)) {
 $modeName = if ($HangBeforeConnect) {
     'HangBeforeConnect'
 }
+elseif ($HangAfterConnect) {
+    'HangAfterConnect'
+}
 elseif ($KillHost) {
     'KillHost'
 }
@@ -440,12 +471,16 @@ $plan = [pscustomobject]@{
     LogFile = $logPath
     SuspendMilliseconds = if ($modeName -eq 'SuspendResume') { $SuspendMilliseconds } else { $null }
     HangMilliseconds = if ($HangBeforeConnect) { $HangMilliseconds } else { $null }
+    PageReadyHangMilliseconds = if ($HangAfterConnect) { $PageReadyHangMilliseconds } else { $null }
     StartupTimeoutSeconds = $StartupTimeoutSeconds
     RecoveryTimeoutSeconds = $RecoveryTimeoutSeconds
     ShutdownTimeoutSeconds = $ShutdownTimeoutSeconds
     HostSelection = 'Name=ThreeUnityWebHost.exe AND ParentProcessId=<new Player PID> AND matching --parent-pid'
     NativeAction = if ($HangBeforeConnect) {
         'NtSuspendProcess before first connection; hold beyond the 10-second deadline; resume only if the retained old Host handle is still alive'
+    }
+    elseif ($HangAfterConnect) {
+        'One-shot inherited Host test gate after pipe connection; hold WebView initialization beyond the 20-second page-ready deadline'
     }
     elseif ($KillHost) {
         'TerminateProcess on one retained handle; require old exit before one replacement Host'
@@ -456,8 +491,11 @@ $plan = [pscustomobject]@{
     EventSequence = if ($HangBeforeConnect) {
         'DISCONNECTED(reason=connect-timeout) -> RELAUNCH_SCHEDULED -> RELAUNCHED -> LOGIC_TRANSPORT_RESET -> PAGE_READY -> LOGIC_READY -> LOGIC_TICK'
     }
+    elseif ($HangAfterConnect) {
+        'CONNECTED -> DISCONNECTED(reason=page-ready-timeout) -> JOB_DRAINED -> RELAUNCH_SCHEDULED -> RELAUNCHED -> LOGIC_TRANSPORT_RESET -> PAGE_READY -> LOGIC_READY -> LOGIC_TICK'
+    }
     elseif ($KillHost) {
-        'READY -> DISCONNECTED -> RELAUNCH_SCHEDULED -> RELAUNCHED -> LOGIC_TRANSPORT_RESET -> READY -> LOGIC_TICK'
+        'READY -> DISCONNECTED -> JOB_DRAINED -> RELAUNCH_SCHEDULED -> RELAUNCHED -> LOGIC_TRANSPORT_RESET -> PAGE_READY -> LOGIC_READY -> LOGIC_TICK'
     }
     elseif ($SkipInputStale) {
         'READY -> SESSION_RESTART -> READY -> LOGIC_TICK'
@@ -467,6 +505,7 @@ $plan = [pscustomobject]@{
     }
     KillHost = [bool] $KillHost
     HangBeforeConnect = [bool] $HangBeforeConnect
+    HangAfterConnect = [bool] $HangAfterConnect
     SkipInputStale = [bool] $SkipInputStale
     ExistingLogWillBeOverwritten = [bool] ([System.IO.File]::Exists($logPath) -and $OverwriteLog)
 }
@@ -572,6 +611,7 @@ $hostHandle = [IntPtr]::Zero
 $replacementHostIdentity = $null
 $replacementHostHandle = [IntPtr]::Zero
 $hostSuspended = $false
+$hostDelayOnceFile = $null
 $runFailure = $null
 $cleanupFailures = [System.Collections.Generic.List[string]]::new()
 $events = [System.Collections.Generic.List[object]]::new()
@@ -584,6 +624,15 @@ try {
     $startInfo.WorkingDirectory = [System.IO.Path]::GetDirectoryName($playerPath)
     $startInfo.UseShellExecute = $false
     $startInfo.Arguments = (($arguments | ForEach-Object { ConvertTo-WindowsCommandLineArgument $_ }) -join ' ')
+    if ($HangAfterConnect) {
+        $hostDelayOnceFile = [System.IO.Path]::Combine(
+            [System.IO.Path]::GetTempPath(),
+            'three-unity-page-ready-delay-' + [guid]::NewGuid().ToString('N') + '.once')
+        $startInfo.Environment['THREE_UNITY_WEB_HOST_TEST_DELAY_AFTER_CONNECT_MS'] =
+            $PageReadyHangMilliseconds.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+        $startInfo.Environment['THREE_UNITY_WEB_HOST_TEST_DELAY_AFTER_CONNECT_ONCE_FILE'] =
+            $hostDelayOnceFile
+    }
     $player = [System.Diagnostics.Process]::Start($startInfo)
     if ($null -eq $player) {
         throw 'System.Diagnostics.Process.Start returned null.'
@@ -609,6 +658,30 @@ try {
         # Check again after suspension to reject the narrow discovery/open race.
         Assert-NoPreConnectEvidence -Path $logPath
         $faultCursor = 0
+    }
+    elseif ($HangAfterConnect) {
+        $connected = Wait-ForLogEvent -Path $logPath -Description 'initial physical Host connection' `
+            -SuccessPattern '(?m)^.*THREE_UNITY_WEB_BRIDGE_CONNECTED\b.*$' -StartIndex 0 `
+            -TimeoutSeconds $StartupTimeoutSeconds -Player $player
+        $events.Add($connected)
+        Write-Host "THREE_UNITY_FAULT_HARNESS_EVENT $($connected.Marker)"
+
+        Wait-ForOneShotMarker -Path $hostDelayOnceFile -Player $player -TimeoutSeconds 2
+        $contentAtFaultStart = Read-SharedTextFile $logPath
+        $faultCursor = if ($null -ne $contentAtFaultStart) {
+            [Math]::Max($connected.NextIndex, $contentAtFaultStart.Length)
+        }
+        else {
+            $connected.NextIndex
+        }
+        if ($null -ne $contentAtFaultStart) {
+            $afterConnection = $contentAtFaultStart.Substring(
+                [Math]::Min($connected.NextIndex, $contentAtFaultStart.Length))
+            if ($afterConnection -match '(?m)^.*(?:THREE_UNITY_WEB_BRIDGE_PAGE_READY|THREE_UNITY_LOGIC_READY)\b.*$') {
+                throw 'Post-connect delay hook was consumed too late; page/logic readiness already appeared.'
+            }
+        }
+        Write-Host "THREE_UNITY_FAULT_HARNESS_HANG_AFTER_CONNECT hostPid=$($hostIdentity.ProcessId) milliseconds=$PageReadyHangMilliseconds marker=$hostDelayOnceFile"
     }
     else {
         $ready = Wait-ForLogEvent -Path $logPath -Description 'initial logic READY' `
@@ -736,6 +809,91 @@ try {
         $events.Add($authoritativeTick)
         Write-Host "THREE_UNITY_FAULT_HARNESS_EVENT $($authoritativeTick.Marker)"
     }
+    elseif ($HangAfterConnect) {
+        $oldHostId = [int] $hostIdentity.ProcessId
+        $pageReadyTimeoutSeconds = $RecoveryTimeoutSeconds `
+            + [int] [Math]::Ceiling($PageReadyHangMilliseconds / 1000.0)
+        $disconnected = Wait-ForLogEvent -Path $logPath -Description 'post-connect page-ready timeout' `
+            -SuccessPattern '(?m)^.*THREE_UNITY_WEB_BRIDGE_DISCONNECTED\b(?=[^\n]*\breason=page-ready-timeout\b)[^\n]*' `
+            -StartIndex $faultCursor -TimeoutSeconds $pageReadyTimeoutSeconds -Player $player
+        $events.Add($disconnected)
+        Write-Host "THREE_UNITY_FAULT_HARNESS_EVENT $($disconnected.Marker)"
+
+        $timeoutContent = Read-SharedTextFile $logPath
+        if ($null -ne $timeoutContent -and $disconnected.Index -gt $connected.NextIndex) {
+            $betweenConnectionAndTimeout = $timeoutContent.Substring(
+                $connected.NextIndex,
+                $disconnected.Index - $connected.NextIndex)
+            if ($betweenConnectionAndTimeout -match '(?m)^.*(?:THREE_UNITY_WEB_BRIDGE_PAGE_READY|THREE_UNITY_LOGIC_READY)\b.*$') {
+                throw 'Page/logic readiness appeared in the timed-out Host generation before page-ready-timeout.'
+            }
+        }
+
+        Wait-ForCapturedHostExit -Handle $hostHandle -HostId $oldHostId -PlayerId $playerPid `
+            -Player $player -TimeoutSeconds $RecoveryTimeoutSeconds
+        Write-Host "THREE_UNITY_FAULT_HARNESS_HOST_EXITED hostPid=$oldHostId"
+
+        $jobDrained = Wait-ForLogEvent -Path $logPath -Description 'retired Windows Job active-process count reaching zero' `
+            -SuccessPattern '(?m)^.*THREE_UNITY_WEB_BRIDGE_JOB_DRAINED\b.*$' `
+            -StartIndex $disconnected.NextIndex -TimeoutSeconds $RecoveryTimeoutSeconds -Player $player
+        $events.Add($jobDrained)
+        Write-Host "THREE_UNITY_FAULT_HARNESS_EVENT $($jobDrained.Marker)"
+
+        $scheduled = Wait-ForLogEvent -Path $logPath -Description 'Host relaunch scheduling after page-ready timeout' `
+            -SuccessPattern '(?m)^.*THREE_UNITY_WEB_BRIDGE_RELAUNCH_SCHEDULED\b(?=[^\n]*\breason=page-ready-timeout\b)[^\n]*' `
+            -StartIndex $jobDrained.NextIndex -TimeoutSeconds $RecoveryTimeoutSeconds -Player $player
+        $events.Add($scheduled)
+        Write-Host "THREE_UNITY_FAULT_HARNESS_EVENT $($scheduled.Marker)"
+
+        $relaunched = Wait-ForLogEvent -Path $logPath -Description 'replacement Host relaunch' `
+            -SuccessPattern '(?m)^.*THREE_UNITY_WEB_BRIDGE_RELAUNCHED\b.*$' -StartIndex $scheduled.NextIndex `
+            -TimeoutSeconds $RecoveryTimeoutSeconds -Player $player
+        $events.Add($relaunched)
+        Write-Host "THREE_UNITY_FAULT_HARNESS_EVENT $($relaunched.Marker)"
+
+        $replacementHostIdentity = Wait-ForReplacementHost -PlayerId $playerPid -OldHostId $oldHostId `
+            -Player $player -TimeoutSeconds $RecoveryTimeoutSeconds
+        $replacementHostId = [int] $replacementHostIdentity.ProcessId
+        $relaunchPidMatch = [regex]::Match($relaunched.Marker, '(?:^|\s)pid=(\d+)(?:\s|$)')
+        if (-not $relaunchPidMatch.Success) {
+            throw "Replacement Host marker does not contain a pid: $($relaunched.Marker)"
+        }
+        if ([int] $relaunchPidMatch.Groups[1].Value -ne $replacementHostId) {
+            throw "Replacement Host marker PID $($relaunchPidMatch.Groups[1].Value) does not match exact child PID $replacementHostId."
+        }
+        if ($replacementHostId -eq $oldHostId) {
+            throw "Replacement Host reused the captured old PID $oldHostId."
+        }
+        if (-not [ThreeUnity.Bridge.Tools.NativeProcess]::WaitForExit($hostHandle, 0)) {
+            throw "Replacement Host PID $replacementHostId appeared before timed-out Host PID $oldHostId signaled exit."
+        }
+        $replacementHostHandle = [ThreeUnity.Bridge.Tools.NativeProcess]::OpenExact($replacementHostId)
+        Write-Host "THREE_UNITY_FAULT_HARNESS_REPLACEMENT_HOST playerPid=$playerPid oldHostPid=$oldHostId hostPid=$replacementHostId"
+
+        $transportReset = Wait-ForLogEvent -Path $logPath -Description 'logic transport generation reset' `
+            -SuccessPattern '(?m)^.*THREE_UNITY_LOGIC_TRANSPORT_RESET\b.*$' -StartIndex $relaunched.NextIndex `
+            -TimeoutSeconds $RecoveryTimeoutSeconds -Player $player
+        $events.Add($transportReset)
+        Write-Host "THREE_UNITY_FAULT_HARNESS_EVENT $($transportReset.Marker)"
+
+        $pageReady = Wait-ForLogEvent -Path $logPath -Description 'replacement WebView page READY' `
+            -SuccessPattern '(?m)^.*THREE_UNITY_WEB_BRIDGE_PAGE_READY\b.*$' -StartIndex $transportReset.NextIndex `
+            -TimeoutSeconds $RecoveryTimeoutSeconds -Player $player
+        $events.Add($pageReady)
+        Write-Host "THREE_UNITY_FAULT_HARNESS_EVENT $($pageReady.Marker)"
+
+        $secondReady = Wait-ForLogEvent -Path $logPath -Description 'post-page-timeout logic READY' `
+            -SuccessPattern '(?m)^.*THREE_UNITY_LOGIC_READY\b.*$' -StartIndex $pageReady.NextIndex `
+            -TimeoutSeconds $RecoveryTimeoutSeconds -Player $player
+        $events.Add($secondReady)
+        Write-Host "THREE_UNITY_FAULT_HARNESS_EVENT $($secondReady.Marker)"
+
+        $authoritativeTick = Wait-ForLogEvent -Path $logPath -Description 'post-page-timeout authoritative logic tick' `
+            -SuccessPattern '(?m)^.*THREE_UNITY_LOGIC_TICK\b.*$' -StartIndex $secondReady.NextIndex `
+            -TimeoutSeconds $RecoveryTimeoutSeconds -Player $player
+        $events.Add($authoritativeTick)
+        Write-Host "THREE_UNITY_FAULT_HARNESS_EVENT $($authoritativeTick.Marker)"
+    }
     elseif ($KillHost) {
         $oldHostId = [int] $hostIdentity.ProcessId
         Write-Host "THREE_UNITY_FAULT_HARNESS_KILL_HOST hostPid=$oldHostId"
@@ -750,8 +908,14 @@ try {
         $events.Add($disconnected)
         Write-Host "THREE_UNITY_FAULT_HARNESS_EVENT $($disconnected.Marker)"
 
+        $jobDrained = Wait-ForLogEvent -Path $logPath -Description 'killed Host Job zero-process fence' `
+            -SuccessPattern '(?m)^.*THREE_UNITY_WEB_BRIDGE_JOB_DRAINED\b.*$' `
+            -StartIndex $disconnected.NextIndex -TimeoutSeconds $RecoveryTimeoutSeconds -Player $player
+        $events.Add($jobDrained)
+        Write-Host "THREE_UNITY_FAULT_HARNESS_EVENT $($jobDrained.Marker)"
+
         $scheduled = Wait-ForLogEvent -Path $logPath -Description 'Host relaunch scheduling' `
-            -SuccessPattern '(?m)^.*THREE_UNITY_WEB_BRIDGE_RELAUNCH_SCHEDULED\b.*$' -StartIndex $disconnected.NextIndex `
+            -SuccessPattern '(?m)^.*THREE_UNITY_WEB_BRIDGE_RELAUNCH_SCHEDULED\b.*$' -StartIndex $jobDrained.NextIndex `
             -TimeoutSeconds $RecoveryTimeoutSeconds -Player $player
         $events.Add($scheduled)
         Write-Host "THREE_UNITY_FAULT_HARNESS_EVENT $($scheduled.Marker)"
@@ -784,8 +948,14 @@ try {
         $events.Add($transportReset)
         Write-Host "THREE_UNITY_FAULT_HARNESS_EVENT $($transportReset.Marker)"
 
+        $pageReady = Wait-ForLogEvent -Path $logPath -Description 'post-relaunch page ready' `
+            -SuccessPattern '(?m)^.*THREE_UNITY_WEB_BRIDGE_PAGE_READY\b.*$' -StartIndex $transportReset.NextIndex `
+            -TimeoutSeconds $RecoveryTimeoutSeconds -Player $player
+        $events.Add($pageReady)
+        Write-Host "THREE_UNITY_FAULT_HARNESS_EVENT $($pageReady.Marker)"
+
         $secondReady = Wait-ForLogEvent -Path $logPath -Description 'post-relaunch logic READY' `
-            -SuccessPattern '(?m)^.*THREE_UNITY_LOGIC_READY\b.*$' -StartIndex $transportReset.NextIndex `
+            -SuccessPattern '(?m)^.*THREE_UNITY_LOGIC_READY\b.*$' -StartIndex $pageReady.NextIndex `
             -TimeoutSeconds $RecoveryTimeoutSeconds -Player $player
         $events.Add($secondReady)
         Write-Host "THREE_UNITY_FAULT_HARNESS_EVENT $($secondReady.Marker)"
@@ -1011,6 +1181,16 @@ finally {
             $cleanupFailures.Add("Final Host orphan inventory failed: $($_.Exception.Message)")
         }
     }
+    if (-not [string]::IsNullOrWhiteSpace($hostDelayOnceFile)) {
+        try {
+            if ([System.IO.File]::Exists($hostDelayOnceFile)) {
+                [System.IO.File]::Delete($hostDelayOnceFile)
+            }
+        }
+        catch {
+            $cleanupFailures.Add("One-shot Host delay marker cleanup failed: $($_.Exception.Message)")
+        }
+    }
     if ($null -ne $player) {
         $player.Dispose()
     }
@@ -1046,8 +1226,10 @@ Write-Host "THREE_UNITY_FAULT_HARNESS_PASS mode=$modeName player=$playerPath hos
     LogFile = $logPath
     SuspendMilliseconds = if ($modeName -eq 'SuspendResume') { $SuspendMilliseconds } else { $null }
     HangMilliseconds = if ($HangBeforeConnect) { $HangMilliseconds } else { $null }
+    PageReadyHangMilliseconds = if ($HangAfterConnect) { $PageReadyHangMilliseconds } else { $null }
     KillHost = [bool] $KillHost
     HangBeforeConnect = [bool] $HangBeforeConnect
+    HangAfterConnect = [bool] $HangAfterConnect
     SkipInputStale = [bool] $SkipInputStale
     MaxConcurrentHostsObserved = $script:MaxConcurrentHostsObserved
     Events = @($events)

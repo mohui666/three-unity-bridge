@@ -17,6 +17,7 @@ namespace ThreeUnity.Bridge
     {
         private const int HostGracefulExitMilliseconds = 750;
         private const int HostKillWaitMilliseconds = 1000;
+        private const int HostTerminationRetryMilliseconds = 250;
         private const int HostJobAssignmentGateMilliseconds = 4500;
         private const string HostJobAssignedMarker = "THREE_UNITY_HOST_JOB_ASSIGNED";
         private const string HostPageReadyMarker = "THREE_UNITY_WEB_HOST_PAGE_READY";
@@ -34,9 +35,10 @@ namespace ThreeUnity.Bridge
         private readonly ThreeUnityWebBridgeLifecycle lifecycle = new ThreeUnityWebBridgeLifecycle();
         private readonly ThreeUnityOutboundBuffer emptyOutbound = new ThreeUnityOutboundBuffer();
         private readonly ThreeUnityOutboundMetricsAccumulator outboundMetrics = new ThreeUnityOutboundMetricsAccumulator();
+        private readonly object leaseIssuerIdentity = new object();
 
         private ConnectionResources activeConnection;
-        private ThreeUnityWindowsHostJob hostJob;
+        private IThreeUnityWindowsHostJob hostJob;
         private long hostJobPageGeneration;
         private long hostJobConnectionGeneration;
         private ThreeUnityWebBridgeLease legacyGenerationlessLease;
@@ -45,7 +47,11 @@ namespace ThreeUnity.Bridge
         private long trackedHostPageGeneration;
         private long trackedHostConnectionGeneration;
         private long hostCleanupDeadlineMilliseconds;
-        private bool hostKillIssued;
+        private bool hostTerminationStarted;
+        private bool rootHostKillIssued;
+        private bool jobTerminationSucceeded;
+        private long nextHostTerminationAttemptMilliseconds;
+        private long jobTerminationFailures;
         private bool hostCleanupTimeoutLogged;
         private bool trackedHostAssignedToJob;
         private int stopping;
@@ -156,8 +162,8 @@ namespace ThreeUnity.Bridge
                 var pipeName = $"three-unity-{GetCurrentProcessId()}-{pageGeneration}-{Guid.NewGuid():N}";
                 connection = new ConnectionResources(pageGeneration, connectionGeneration, pipeName);
                 connection.Lease = new ThreeUnityWebBridgeLease(
-                    this,
-                    connection,
+                    leaseIssuerIdentity,
+                    connection.LeaseIdentity,
                     pageGeneration,
                     connectionGeneration);
                 activeConnection = connection;
@@ -216,7 +222,7 @@ namespace ThreeUnity.Bridge
                 Interlocked.Increment(ref jobAssignedProcesses);
                 connection.JobAssignedSignal.Set();
                 hostCleanupDeadlineMilliseconds = 0;
-                hostKillIssued = false;
+                ResetHostTerminationState();
                 hostCleanupTimeoutLogged = false;
                 launchedProcess.BeginErrorReadLine();
                 var marker = lifecycle.Relaunches > 0
@@ -645,8 +651,9 @@ namespace ThreeUnity.Bridge
                 return;
             }
 
-            if (hostKillIssued)
+            if (hostTerminationStarted)
             {
+                BeginTrackedJobTermination(nowMilliseconds);
                 CompleteRetirementWithoutHost(
                     pageGeneration,
                     connectionGeneration,
@@ -690,47 +697,60 @@ namespace ThreeUnity.Bridge
 
         private void BeginTrackedJobTermination(long nowMilliseconds)
         {
-            if (hostKillIssued)
-                return;
+            if (!hostTerminationStarted)
+            {
+                hostTerminationStarted = true;
+                hostCleanupDeadlineMilliseconds = AddDeadline(
+                    nowMilliseconds,
+                    HostKillWaitMilliseconds);
+            }
 
-            var terminated = false;
-            if (trackedHostAssignedToJob && hostJob != null && !hostJob.IsDisposed)
+            if (nowMilliseconds < nextHostTerminationAttemptMilliseconds)
+                return;
+            nextHostTerminationAttemptMilliseconds = AddDeadline(
+                nowMilliseconds,
+                HostTerminationRetryMilliseconds);
+
+            var usableAssignedJob = trackedHostAssignedToJob
+                && hostJob != null
+                && !hostJob.IsDisposed;
+            if (!usableAssignedJob)
+                jobTerminationSucceeded = true;
+            else if (!jobTerminationSucceeded)
             {
                 try
                 {
                     hostJob.Terminate();
-                    terminated = true;
+                    jobTerminationSucceeded = true;
                 }
                 catch (InvalidOperationException exception)
                 {
-                    Debug.LogError("THREE_UNITY_WEB_BRIDGE_JOB_TERMINATE_FAILED " + exception.Message);
+                    LogJobTerminationFailure(exception.Message);
                 }
                 catch (System.ComponentModel.Win32Exception exception)
                 {
-                    Debug.LogError("THREE_UNITY_WEB_BRIDGE_JOB_TERMINATE_FAILED " + exception.Message);
+                    LogJobTerminationFailure(exception.Message);
                 }
             }
 
-            if (!terminated)
+            // A failed Job termination may still allow the root Host to be
+            // killed, but that does not prove its WebView2 children are gone.
+            // Keep the two facts separate so the Job call is retried above.
+            if (!jobTerminationSucceeded && !rootHostKillIssued)
             {
                 var process = hostProcess;
                 try
                 {
                     if (process != null && !HasExited(process))
                         process.Kill();
-                    terminated = true;
+                    rootHostKillIssued = true;
                 }
-                catch (InvalidOperationException) { terminated = true; }
+                catch (InvalidOperationException) { rootHostKillIssued = true; }
                 catch (System.ComponentModel.Win32Exception exception)
                 {
                     Debug.LogError("THREE_UNITY_WEB_BRIDGE_PROCESS_KILL_FAILED " + exception.Message);
                 }
             }
-
-            if (!terminated)
-                return;
-            hostKillIssued = true;
-            hostCleanupDeadlineMilliseconds = nowMilliseconds + HostKillWaitMilliseconds;
         }
 
         private void CompleteRetirementWithoutHost(
@@ -753,14 +773,18 @@ namespace ThreeUnity.Bridge
                 if (hostJobPageGeneration != pageGeneration
                     || hostJobConnectionGeneration != connectionGeneration)
                     return;
-                if (!hostKillIssued)
+                var activeProcesses = SafeActiveJobProcessCount();
+                if (activeProcesses != 0)
                 {
                     BeginTrackedJobTermination(nowMilliseconds);
-                    if (!hostKillIssued)
-                        return;
+                    activeProcesses = SafeActiveJobProcessCount();
                 }
-                if (SafeActiveJobProcessCount() != 0)
+                if (activeProcesses != 0)
                     return;
+                Debug.Log("THREE_UNITY_WEB_BRIDGE_JOB_DRAINED"
+                    + " pageGeneration=" + pageGeneration
+                    + " connectionGeneration=" + connectionGeneration
+                    + " activeProcesses=0");
                 DisposeCurrentHostJob();
             }
 
@@ -769,7 +793,7 @@ namespace ThreeUnity.Bridge
             trackedHostPageGeneration = 0;
             trackedHostConnectionGeneration = 0;
             hostCleanupDeadlineMilliseconds = 0;
-            hostKillIssued = false;
+            ResetHostTerminationState();
             hostCleanupTimeoutLogged = false;
             trackedHostAssignedToJob = false;
             Debug.Log("THREE_UNITY_WEB_BRIDGE_RELAUNCH_SCHEDULED"
@@ -891,8 +915,8 @@ namespace ThreeUnity.Bridge
                     || connection.IsRetired
                     || connection.Lease == null
                     || !connection.Lease.Matches(
-                        this,
-                        connection,
+                        leaseIssuerIdentity,
+                        connection.LeaseIdentity,
                         currentPage,
                         currentConnection))
                 {
@@ -955,6 +979,14 @@ namespace ThreeUnity.Bridge
 
         public bool SendToWeb(ThreeUnityWebBridgeLease lease, string message)
         {
+            return SendToWeb(lease, null, message);
+        }
+
+        internal bool SendToWeb(
+            ThreeUnityWebBridgeLease lease,
+            object owner,
+            string message)
+        {
             if (!TryGetWritableConnection(lease, out var connection))
             {
                 LogGenerationRejection(
@@ -963,11 +995,18 @@ namespace ThreeUnity.Bridge
                     lease == null ? 0 : lease.ConnectionGeneration);
                 return false;
             }
-            if (!connection.Outbound.EnqueueReliable(message ?? string.Empty))
+            if (!connection.Outbound.EnqueueReliable(owner, message ?? string.Empty))
             {
-                Debug.LogWarning("THREE_UNITY_WEB_BRIDGE_RELIABLE_OVERFLOW"
-                    + " pageGeneration=" + lease.PageGeneration
-                    + " connectionGeneration=" + lease.ConnectionGeneration);
+                var rejected = connection.Outbound.Snapshot().ReliableBackpressureRejected;
+                // A stalled writer can make the retained head retry every frame.
+                // Preserve exact retry metrics but keep logs exponentially bounded.
+                if (IsPowerOfTwo(rejected))
+                {
+                    Debug.LogWarning("THREE_UNITY_WEB_BRIDGE_RELIABLE_BACKPRESSURE"
+                        + " pageGeneration=" + lease.PageGeneration
+                        + " connectionGeneration=" + lease.ConnectionGeneration
+                        + " rejected=" + rejected);
+                }
                 return false;
             }
             connection.OutboundSignal.Set();
@@ -1001,6 +1040,15 @@ namespace ThreeUnity.Bridge
             string stream,
             string message)
         {
+            return SendLatestToWeb(lease, null, stream, message);
+        }
+
+        internal bool SendLatestToWeb(
+            ThreeUnityWebBridgeLease lease,
+            object owner,
+            string stream,
+            string message)
+        {
             if (!TryGetWritableConnection(lease, out var connection))
             {
                 LogGenerationRejection(
@@ -1009,9 +1057,20 @@ namespace ThreeUnity.Bridge
                     lease == null ? 0 : lease.ConnectionGeneration);
                 return false;
             }
-            connection.Outbound.EnqueueLatest(stream, message ?? string.Empty);
+            connection.Outbound.EnqueueLatest(owner, stream, message ?? string.Empty);
             connection.OutboundSignal.Set();
             return true;
+        }
+
+        internal int PurgeOutbound(
+            ThreeUnityWebBridgeLease lease,
+            object owner)
+        {
+            if (owner == null)
+                throw new ArgumentNullException(nameof(owner));
+            if (!TryGetWritableConnection(lease, out var connection))
+                return 0;
+            return connection.Outbound.PurgeOwner(owner);
         }
 
         public ThreeUnityBridgeTransportMetrics GetTransportMetrics()
@@ -1084,8 +1143,8 @@ namespace ThreeUnity.Bridge
                 && connection != null
                 && connection.Lease != null
                 && lease.Matches(
-                    this,
-                    connection,
+                    leaseIssuerIdentity,
+                    connection.LeaseIdentity,
                     lifecycle.PageGeneration,
                     lifecycle.ConnectionGeneration)
                 && ReferenceEquals(connection.Lease, lease)
@@ -1321,6 +1380,37 @@ namespace ThreeUnity.Bridge
             return (long)(Stopwatch.GetTimestamp() * (1000.0 / Stopwatch.Frequency));
         }
 
+        private static bool IsPowerOfTwo(long value)
+        {
+            return value > 0 && (value & (value - 1)) == 0;
+        }
+
+        private void LogJobTerminationFailure(string message)
+        {
+            jobTerminationFailures++;
+            if (!IsPowerOfTwo(jobTerminationFailures))
+                return;
+            Debug.LogError("THREE_UNITY_WEB_BRIDGE_JOB_TERMINATE_FAILED"
+                + " attempts=" + jobTerminationFailures
+                + " message=" + message);
+        }
+
+        private void ResetHostTerminationState()
+        {
+            hostTerminationStarted = false;
+            rootHostKillIssued = false;
+            jobTerminationSucceeded = false;
+            nextHostTerminationAttemptMilliseconds = 0;
+            jobTerminationFailures = 0;
+        }
+
+        private static long AddDeadline(long nowMilliseconds, int delayMilliseconds)
+        {
+            return nowMilliseconds > long.MaxValue - delayMilliseconds
+                ? long.MaxValue
+                : nowMilliseconds + delayMilliseconds;
+        }
+
         private static void DisposeQuietly(IDisposable disposable)
         {
             if (disposable == null)
@@ -1416,6 +1506,7 @@ namespace ThreeUnity.Bridge
             {
                 PageGeneration = pageGeneration;
                 ConnectionGeneration = connectionGeneration;
+                LeaseIdentity = new object();
                 Pipe = new NamedPipeServerStream(
                     pipeName,
                     PipeDirection.InOut,
@@ -1429,6 +1520,7 @@ namespace ThreeUnity.Bridge
 
             public long PageGeneration { get; }
             public long ConnectionGeneration { get; }
+            public object LeaseIdentity { get; }
             public ThreeUnityWebBridgeLease Lease { get; set; }
             public NamedPipeServerStream Pipe { get; }
             public ThreeUnityOutboundBuffer Outbound { get; }

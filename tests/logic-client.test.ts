@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   LogicClient,
+  notifyWebViewListenerReady,
   type LogicTransport,
+  WEBVIEW_LISTENER_READY_CONTROL_MESSAGE,
   WebViewLogicTransport,
 } from "../src/logic/client.js";
 import { encodeLogicEnvelope } from "../src/logic/protocol.js";
@@ -436,6 +438,69 @@ test("all reliable and latest-value outputs after start carry the active session
 test("WebView transport reports unavailable outside a WebView2 host", () => {
   const transport = new WebViewLogicTransport({});
   assert.equal(transport.available, false);
+  assert.equal(notifyWebViewListenerReady({}), false);
   assert.doesNotThrow(() => transport.send("{}"));
   assert.doesNotThrow(() => transport.subscribe(() => undefined)());
+});
+
+test("WebView transport installs its listener before sending the internal ready ACK", () => {
+  const operations: string[] = [];
+  const posted: unknown[] = [];
+  let listener: ((event: { data: unknown }) => void) | undefined;
+  const scope = {
+    chrome: {
+      webview: {
+        postMessage(message: unknown): void {
+          operations.push(`post:${String(message)}`);
+          posted.push(message);
+        },
+        addEventListener(
+          type: "message",
+          handler: (event: { data: unknown }) => void,
+        ): void {
+          assert.equal(type, "message");
+          operations.push("listener:add");
+          listener = handler;
+        },
+        removeEventListener(
+          type: "message",
+          handler: (event: { data: unknown }) => void,
+        ): void {
+          assert.equal(type, "message");
+          assert.equal(handler, listener);
+          operations.push("listener:remove");
+        },
+      },
+    },
+  };
+  const received: string[] = [];
+  const transport = new WebViewLogicTransport(scope);
+
+  const unsubscribe = transport.subscribe(message => received.push(message));
+
+  assert.equal(transport.available, true);
+  assert.deepEqual(operations, [
+    "listener:add",
+    `post:${WEBVIEW_LISTENER_READY_CONTROL_MESSAGE}`,
+  ]);
+  assert.deepEqual(posted, [WEBVIEW_LISTENER_READY_CONTROL_MESSAGE]);
+  listener?.({ data: { protocol: 1, type: "bridge.ready" } });
+  assert.deepEqual(received, ['{"protocol":1,"type":"bridge.ready"}']);
+  unsubscribe();
+  assert.equal(operations.at(-1), "listener:remove");
+});
+
+test("custom pages can explicitly acknowledge their own WebView listener", () => {
+  const posted: unknown[] = [];
+  const scope = {
+    chrome: {
+      webview: {
+        postMessage(message: unknown): void { posted.push(message); },
+        addEventListener(): void { /* custom page owns its listener */ },
+      },
+    },
+  };
+
+  assert.equal(notifyWebViewListenerReady(scope), true);
+  assert.deepEqual(posted, [WEBVIEW_LISTENER_READY_CONTROL_MESSAGE]);
 });

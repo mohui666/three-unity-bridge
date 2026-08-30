@@ -156,6 +156,228 @@ public sealed class HostRecoveryTests
     }
 
     [Fact]
+    public void ListenerReadyControlFrameIsExactAndInternal()
+    {
+        Assert.Equal("THREE_UNITY_WEB_LISTENER_READY", HostWebControlProtocol.ListenerReady);
+        Assert.Equal("\"THREE_UNITY_WEB_LISTENER_READY\"", HostWebControlProtocol.ListenerReadyJson);
+        Assert.True(HostWebControlProtocol.IsListenerReady(HostWebControlProtocol.ListenerReadyJson));
+        Assert.False(HostWebControlProtocol.IsListenerReady(HostWebControlProtocol.ListenerReady));
+        Assert.False(HostWebControlProtocol.IsListenerReady(
+            "{\"type\":\"THREE_UNITY_WEB_LISTENER_READY\"}"));
+        Assert.False(HostWebControlProtocol.IsListenerReady(
+            HostWebControlProtocol.ListenerReadyJson + " "));
+    }
+
+    [Fact]
+    public void NavigationWithoutListenerAckReportsPageReadyButKeepsMessagesBuffered()
+    {
+        var readiness = new WebPageReadinessCoordinator();
+        var queue = new BoundedHostMessageQueue<string>(4);
+        Assert.True(queue.TryEnqueue("startup"));
+
+        Assert.True(readiness.BeginDocument(10).Accepted);
+        var navigation = readiness.MarkNavigationReady(10);
+
+        Assert.True(navigation.Accepted);
+        Assert.True(navigation.ReportPageReady);
+        Assert.False(navigation.OpenDispatch);
+        Assert.True(readiness.HasReportedPageReady);
+        Assert.False(readiness.IsDispatchOpen);
+        Assert.Equal(1, queue.Count);
+    }
+
+    [Fact]
+    public void ListenerAckAfterNavigationReleasesBufferedMessagesInOrderExactlyOnce()
+    {
+        var readiness = new WebPageReadinessCoordinator();
+        var queue = new BoundedHostMessageQueue<string>(4);
+        Assert.True(queue.TryEnqueue("first"));
+        Assert.True(queue.TryEnqueue("second"));
+        readiness.BeginDocument(20);
+        Assert.False(readiness.MarkNavigationReady(20).OpenDispatch);
+
+        var listener = readiness.MarkListenerReady();
+
+        Assert.False(listener.ReportPageReady);
+        Assert.True(listener.OpenDispatch);
+        Assert.True(readiness.IsDispatchOpen);
+        var drained = new List<string>();
+        while (queue.TryDequeue(out var message))
+            drained.Add(message);
+        Assert.Equal(new[] { "first", "second" }, drained);
+        Assert.False(readiness.MarkListenerReady().OpenDispatch);
+        Assert.False(queue.TryDequeue(out _));
+    }
+
+    [Fact]
+    public void ListenerAckBeforeNavigationStillWaitsForNavigation()
+    {
+        var readiness = new WebPageReadinessCoordinator();
+        readiness.BeginDocument(30);
+
+        var listener = readiness.MarkListenerReady();
+        Assert.False(listener.ReportPageReady);
+        Assert.False(listener.OpenDispatch);
+        Assert.False(readiness.HasReportedPageReady);
+        Assert.False(readiness.IsDispatchOpen);
+
+        var navigation = readiness.MarkNavigationReady(30);
+        Assert.True(navigation.ReportPageReady);
+        Assert.True(navigation.OpenDispatch);
+        Assert.True(readiness.HasReportedPageReady);
+        Assert.True(readiness.IsDispatchOpen);
+
+        var duplicateNavigation = readiness.MarkNavigationReady(30);
+        Assert.False(duplicateNavigation.ReportPageReady);
+        Assert.False(duplicateNavigation.OpenDispatch);
+    }
+
+    [Fact]
+    public async Task ReadinessSignalsReportAndOpenExactlyOnceUnderConcurrency()
+    {
+        var readiness = new WebPageReadinessCoordinator();
+        readiness.BeginDocument(40);
+        var signals = Enumerable.Range(0, 128)
+            .Select(index => Task.Run(() => index % 2 == 0
+                ? readiness.MarkNavigationReady(40)
+                : readiness.MarkListenerReady()));
+
+        var results = await Task.WhenAll(signals);
+
+        Assert.True(readiness.HasReportedPageReady);
+        Assert.True(readiness.IsDispatchOpen);
+        Assert.Single(results, transition => transition.ReportPageReady);
+        Assert.Single(results, transition => transition.OpenDispatch);
+    }
+
+    [Fact]
+    public void RedirectedDocumentCannotReuseListenerAckOrStaleCompletion()
+    {
+        var readiness = new WebPageReadinessCoordinator();
+        Assert.True(readiness.BeginDocument(100).Accepted);
+        Assert.True(readiness.MarkListenerReady().Accepted);
+
+        var replacement = readiness.BeginDocument(101);
+
+        Assert.True(replacement.Accepted);
+        Assert.False(replacement.RetireHost);
+        Assert.False(readiness.IsDispatchOpen);
+        Assert.Equal((ulong)101, readiness.CurrentDocumentNavigationId);
+
+        var staleCompletion = readiness.MarkNavigationReady(100);
+        Assert.False(staleCompletion.Accepted);
+        Assert.False(staleCompletion.ReportPageReady);
+        Assert.False(staleCompletion.OpenDispatch);
+
+        var currentCompletion = readiness.MarkNavigationReady(101);
+        Assert.True(currentCompletion.ReportPageReady);
+        Assert.False(currentCompletion.OpenDispatch);
+        Assert.True(readiness.MarkListenerReady().OpenDispatch);
+    }
+
+    [Fact]
+    public void NewDocumentAfterPageReadyRetiresHostButSameDocumentSignalsDoNot()
+    {
+        var readiness = new WebPageReadinessCoordinator();
+        readiness.BeginDocument(200);
+        readiness.MarkListenerReady();
+        Assert.True(readiness.MarkNavigationReady(200).ReportPageReady);
+        Assert.True(readiness.IsDispatchOpen);
+
+        // Hash/history navigation has no ContentLoading. A completion carrying a
+        // different navigation id is therefore stale and cannot disturb the
+        // current document latch.
+        Assert.False(readiness.MarkNavigationReady(201).Accepted);
+        Assert.True(readiness.IsDispatchOpen);
+        Assert.False(readiness.BeginDocument(200).RetireHost);
+
+        var hardNavigation = readiness.BeginDocument(202);
+        Assert.False(hardNavigation.Accepted);
+        Assert.True(hardNavigation.RetireHost);
+    }
+
+    [Fact]
+    public void ListenerAckBeforeAnyDocumentCannotPrimeFutureNavigation()
+    {
+        var readiness = new WebPageReadinessCoordinator();
+
+        Assert.False(readiness.MarkListenerReady().Accepted);
+        readiness.BeginDocument(300);
+        var navigation = readiness.MarkNavigationReady(300);
+
+        Assert.True(navigation.ReportPageReady);
+        Assert.False(navigation.OpenDispatch);
+        Assert.False(readiness.IsDispatchOpen);
+    }
+
+    [Fact]
+    public void BoundedWebQueueHasAtomicCapacityAndPreservesAcceptedMessages()
+    {
+        const int capacity = 32;
+        var queue = new BoundedHostMessageQueue<int>(capacity);
+        var accepted = 0;
+
+        Parallel.For(0, 10_000, value =>
+        {
+            if (queue.TryEnqueue(value))
+                Interlocked.Increment(ref accepted);
+        });
+
+        Assert.Equal(capacity, accepted);
+        Assert.Equal(capacity, queue.Count);
+        var drained = new HashSet<int>();
+        while (queue.TryDequeue(out var value))
+            Assert.True(drained.Add(value));
+        Assert.Equal(capacity, drained.Count);
+        Assert.Equal(0, queue.Count);
+    }
+
+    [Fact]
+    public void OneShotDelayIsClaimedByOnlyTheFirstHostGeneration()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            "three-unity-host-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var marker = Path.Combine(root, "delay-once.marker");
+        try
+        {
+            var first = HostTestHooks.ClaimDelayAfterConnect("125", marker);
+            var replacement = HostTestHooks.ClaimDelayAfterConnect("125", marker);
+
+            Assert.Equal(TimeSpan.FromMilliseconds(125), first);
+            Assert.Equal(TimeSpan.Zero, replacement);
+            Assert.Equal(Environment.ProcessId.ToString(), File.ReadAllText(marker));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void IncompleteTestDelayConfigurationHasNoRuntimeEffect()
+    {
+        Assert.Equal(TimeSpan.Zero, HostTestHooks.ClaimDelayAfterConnect(null, "marker"));
+        Assert.Equal(TimeSpan.Zero, HostTestHooks.ClaimDelayAfterConnect("100", null));
+        Assert.Equal(TimeSpan.Zero, HostTestHooks.ClaimDelayAfterConnect("", ""));
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("60001")]
+    [InlineData("not-a-number")]
+    public void InvalidConfiguredTestDelayIsRejectedBeforeMarkerCreation(string milliseconds)
+    {
+        var marker = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            HostTestHooks.ClaimDelayAfterConnect(milliseconds, marker));
+        Assert.False(File.Exists(marker));
+    }
+
+    [Fact]
     public async Task JobAssignmentGateConsumesOnlyTheExactInternalMarker()
     {
         var gate = new HostJobAssignmentGate();

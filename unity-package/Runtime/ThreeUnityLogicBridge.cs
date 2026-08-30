@@ -8,16 +8,24 @@ namespace ThreeUnity.Bridge
     [RequireComponent(typeof(ThreeUnityWebBridgeLauncher))]
     public sealed class ThreeUnityLogicBridge : MonoBehaviour
     {
+        private const int MaxOutgoingMessagesPerFlush = 256;
+
         [SerializeField] private ThreeUnityWebBridgeLauncher launcher;
         [SerializeField] private string logicProfile;
 
         private ThreeUnityLogicSessionRouter router;
         private ThreeUnityWebBridgeLease activeLease;
+        private object activeOutboundOwner = new object();
         private bool hasPendingOutgoing;
+        private object pendingOutgoingOwner;
         private string pendingOutgoingJson;
         private bool pendingOutgoingIsLatest;
         private string pendingOutgoingStreamKey;
+        private long outboundFlushBudgetStops;
+        private int maxOutgoingMessagesPerFlush;
         private long fixedTicks;
+        private bool applicationFocused = true;
+        private bool applicationPaused;
 
         public void Configure(ThreeUnityWebBridgeLauncher webLauncher, string profile)
         {
@@ -29,11 +37,39 @@ namespace ThreeUnity.Bridge
         {
             if (launcher == null)
                 launcher = GetComponent<ThreeUnityWebBridgeLauncher>();
+            applicationFocused = Application.isFocused;
+            applicationPaused = false;
             router = new ThreeUnityLogicSessionRouter(
                 logicProfile,
                 initialHostGeneration: launcher == null ? 0 : launcher.PageGeneration);
+            router.SetApplicationLifecycle(applicationFocused, applicationPaused);
             if (router.CurrentModule == null)
                 enabled = false;
+        }
+
+        private void OnApplicationFocus(bool focused)
+        {
+            UpdateApplicationLifecycle(focused, applicationPaused, "focus");
+        }
+
+        private void OnApplicationPause(bool paused)
+        {
+            UpdateApplicationLifecycle(applicationFocused, paused, "pause");
+        }
+
+        private void UpdateApplicationLifecycle(bool focused, bool paused, string source)
+        {
+            applicationFocused = focused;
+            applicationPaused = paused;
+            if (router == null || !router.SetApplicationLifecycle(focused, paused))
+                return;
+            Debug.Log("THREE_UNITY_RUNTIME_LIFECYCLE"
+                + " source=" + source
+                + " focused=" + (focused ? 1 : 0)
+                + " paused=" + (paused ? 1 : 0)
+                + " active=" + (router.ApplicationActive ? 1 : 0)
+                + " revision=" + router.ApplicationLifecycleRevision);
+            FlushOutgoing();
         }
 
         /// <summary>
@@ -48,8 +84,8 @@ namespace ThreeUnity.Bridge
             var reset = router.ResetForHostGeneration(pageGeneration);
             if (reset)
             {
+                RotateOutboundOwner(false, "physical-generation");
                 activeLease = null;
-                ClearPendingOutgoing();
                 Debug.Log("THREE_UNITY_LOGIC_TRANSPORT_RESET page=" + pageGeneration);
             }
             return reset;
@@ -102,8 +138,10 @@ namespace ThreeUnity.Bridge
                 var result = router.Handle(json, header);
                 if (result == ThreeUnityLogicRouteResult.Restarted)
                 {
+                    var purged = RotateOutboundOwner(true, "logical-session");
                     Debug.Log("THREE_UNITY_LOGIC_SESSION_RESTART profile=" + logicProfile
-                        + " restarts=" + router.SessionRestarts);
+                        + " restarts=" + router.SessionRestarts
+                        + " outboundPurged=" + purged);
                 }
             }
             catch (Exception exception)
@@ -146,46 +184,62 @@ namespace ThreeUnity.Bridge
                     return;
             }
 
-            while (router != null)
+            var sentThisFlush = 0;
+            while (router != null && sentThisFlush < MaxOutgoingMessagesPerFlush)
             {
                 if (!hasPendingOutgoing)
                 {
-                    if (!router.TryDequeueOutgoing(out pendingOutgoingJson))
+                    if (!router.TryDequeueOutgoingMessage(out var outgoing))
+                    {
+                        RecordOutgoingFlush(sentThisFlush);
                         return;
+                    }
 
+                    pendingOutgoingJson = outgoing.Json;
                     hasPendingOutgoing = true;
-                    pendingOutgoingIsLatest = LogicEnvelopeParser.TryParseHeader(
-                            pendingOutgoingJson,
-                            out var header,
-                            out _)
-                        && header.type.EndsWith(".state", StringComparison.Ordinal);
-                    pendingOutgoingStreamKey = pendingOutgoingIsLatest
-                        ? LatestStreamKey(header)
-                        : null;
+                    pendingOutgoingOwner = activeOutboundOwner;
+                    pendingOutgoingIsLatest = outgoing.IsLatestState;
+                    pendingOutgoingStreamKey = outgoing.StreamKey;
                 }
 
                 var sent = pendingOutgoingIsLatest
                     ? launcher.SendLatestToWeb(
                         activeLease,
+                        pendingOutgoingOwner,
                         pendingOutgoingStreamKey,
                         pendingOutgoingJson)
-                    : launcher.SendToWeb(activeLease, pendingOutgoingJson);
+                    : launcher.SendToWeb(
+                        activeLease,
+                        pendingOutgoingOwner,
+                        pendingOutgoingJson);
                 if (!sent)
                 {
                     // A full reliable queue or a lease retired between validation
                     // and enqueue must not consume the module's message. Keep this
                     // exact envelope at the head and retry it before dequeuing more.
                     activeLease = null;
+                    RecordOutgoingFlush(sentThisFlush);
                     return;
                 }
 
                 ClearPendingOutgoing();
+                sentThisFlush++;
             }
+            RecordOutgoingFlush(sentThisFlush);
+        }
+
+        private void RecordOutgoingFlush(int sent)
+        {
+            if (sent > maxOutgoingMessagesPerFlush)
+                maxOutgoingMessagesPerFlush = sent;
+            if (sent >= MaxOutgoingMessagesPerFlush)
+                outboundFlushBudgetStops++;
         }
 
         private void ClearPendingOutgoing()
         {
             hasPendingOutgoing = false;
+            pendingOutgoingOwner = null;
             pendingOutgoingJson = null;
             pendingOutgoingIsLatest = false;
             pendingOutgoingStreamKey = null;
@@ -213,7 +267,10 @@ namespace ThreeUnity.Bridge
                 + " rxChars=" + metrics.WebCharactersReceived
                 + " txChars=" + metrics.UnityCharactersWritten
                 + " coalesced=" + outbound.LatestCoalesced
+                + " backpressure=" + outbound.ReliableBackpressureRejected
                 + " dropped=" + outbound.ReliableDropped
+                + " ownerPurged=" + outbound.OwnerPurged
+                + " fairnessYields=" + outbound.ReliableBurstYields
                 + " inPending=" + metrics.InboundPending
                 + " outPending=" + (outbound.PendingReliable + outbound.PendingLatest)
                 + " maxIn=" + metrics.MaxInboundPending
@@ -238,8 +295,19 @@ namespace ThreeUnity.Bridge
                 + " jobAssigned=" + metrics.JobAssignedProcesses
                 + " jobActive=" + metrics.ActiveJobProcesses
                 + " sessionRestarts=" + (router?.SessionRestarts ?? 0)
+                + " logicDiscarded=" + (router?.RetiredOutgoingDiscarded ?? 0)
                 + " sessionRejected=" + (router?.SessionRejected ?? 0)
                 + " sequenceRejected=" + (router?.SequenceRejected ?? 0)
+                + " metadataFast=" + (router?.OutgoingMetadataFastPath ?? 0)
+                + " metadataFallback=" + (router?.OutgoingMetadataFallbackParses ?? 0)
+                + " flushBudgetStops=" + outboundFlushBudgetStops
+                + " maxFlush=" + maxOutgoingMessagesPerFlush
+                + " lifecycleChanges=" + (router?.LifecycleChanges ?? 0)
+                + " lifecycleEmitted=" + (router?.LifecycleEmitted ?? 0)
+                + " lifecycleCoalesced=" + (router?.LifecycleCoalesced ?? 0)
+                + " lifecycleAck=" + (router?.LifecycleAcknowledged ?? 0)
+                + " lifecycleAckRejected=" + (router?.LifecycleAckRejected ?? 0)
+                + " lifecycleActive=" + ((router?.ApplicationActive ?? true) ? 1 : 0)
                 + " inputFresh=" + ((input?.Fresh ?? false) ? 1 : 0)
                 + " inputAgeMs=" + Mathf.RoundToInt((input?.AgeSeconds ?? 0f) * 1000f)
                 + " inputExpired=" + (input?.Expirations ?? 0)
@@ -252,14 +320,40 @@ namespace ThreeUnity.Bridge
             router?.Dispose();
             router = null;
             activeLease = null;
+            activeOutboundOwner = null;
             ClearPendingOutgoing();
         }
 
-        private static string LatestStreamKey(LogicEnvelopeHeader header)
+        private int RotateOutboundOwner(bool purgeCurrentConnection, string reason)
         {
-            return string.IsNullOrWhiteSpace(header.sessionId)
-                ? header.type
-                : header.sessionId + ":" + header.type;
+            var retiredOwner = activeOutboundOwner;
+            var retainedPendingDiscarded = hasPendingOutgoing;
+            var purged = 0;
+            if (purgeCurrentConnection && retiredOwner != null && launcher != null)
+            {
+                var lease = activeLease;
+                if ((lease == null || !launcher.IsLeaseCurrent(lease))
+                    && launcher.TryAcquireCurrentLease(out var currentLease))
+                    lease = currentLease;
+                if (lease != null
+                    && router != null
+                    && lease.PageGeneration == router.HostGeneration)
+                    purged = launcher.PurgeOutbound(lease, retiredOwner);
+            }
+
+            if (retainedPendingDiscarded && router != null)
+                router.RecordRetainedOutgoingDiscarded();
+            activeOutboundOwner = new object();
+            ClearPendingOutgoing();
+            if (purged > 0 || retainedPendingDiscarded)
+            {
+                Debug.Log("THREE_UNITY_LOGIC_OUTBOUND_EPOCH_RETIRED"
+                    + " reason=" + reason
+                    + " purged=" + purged
+                    + " retainedPendingDiscarded=" + (retainedPendingDiscarded ? 1 : 0));
+            }
+            return purged;
         }
+
     }
 }

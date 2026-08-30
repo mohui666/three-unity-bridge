@@ -10,18 +10,20 @@ namespace ThreeUnity.Bridge
     /// </summary>
     public sealed class ThreeUnityWebBridgeLease
     {
-        private readonly object issuer;
-        private readonly object connectionIdentity;
+        // These are deliberately standalone tokens, not the launcher or its
+        // ConnectionResources. Keeping an old lease must not retain disposed I/O.
+        private readonly object issuerToken;
+        private readonly object connectionToken;
 
         internal ThreeUnityWebBridgeLease(
-            object issuer,
-            object connectionIdentity,
+            object issuerToken,
+            object connectionToken,
             long pageGeneration,
             long connectionGeneration)
         {
-            this.issuer = issuer ?? throw new ArgumentNullException(nameof(issuer));
-            this.connectionIdentity = connectionIdentity
-                ?? throw new ArgumentNullException(nameof(connectionIdentity));
+            this.issuerToken = issuerToken ?? throw new ArgumentNullException(nameof(issuerToken));
+            this.connectionToken = connectionToken
+                ?? throw new ArgumentNullException(nameof(connectionToken));
             if (pageGeneration <= 0)
                 throw new ArgumentOutOfRangeException(nameof(pageGeneration));
             if (connectionGeneration <= 0)
@@ -34,13 +36,13 @@ namespace ThreeUnity.Bridge
         public long ConnectionGeneration { get; }
 
         internal bool Matches(
-            object candidateIssuer,
-            object candidateConnectionIdentity,
+            object candidateIssuerToken,
+            object candidateConnectionToken,
             long candidatePageGeneration,
             long candidateConnectionGeneration)
         {
-            return ReferenceEquals(issuer, candidateIssuer)
-                && ReferenceEquals(connectionIdentity, candidateConnectionIdentity)
+            return ReferenceEquals(issuerToken, candidateIssuerToken)
+                && ReferenceEquals(connectionToken, candidateConnectionToken)
                 && PageGeneration == candidatePageGeneration
                 && ConnectionGeneration == candidateConnectionGeneration;
         }

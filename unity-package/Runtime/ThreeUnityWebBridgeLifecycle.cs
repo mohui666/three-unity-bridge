@@ -671,7 +671,11 @@ namespace ThreeUnity.Bridge
         private long reliableQueued;
         private long latestQueued;
         private long latestCoalesced;
+        private long reliableBackpressureRejected;
         private long reliableDropped;
+        private long ownerPurgedReliable;
+        private long ownerPurgedLatest;
+        private long reliableBurstYields;
         private long dequeued;
         private int maxPending;
 
@@ -682,7 +686,14 @@ namespace ThreeUnity.Bridge
             reliableQueued += snapshot.ReliableQueued;
             latestQueued += snapshot.LatestQueued;
             latestCoalesced += snapshot.LatestCoalesced;
-            reliableDropped += snapshot.ReliableDropped;
+            reliableBackpressureRejected += snapshot.ReliableBackpressureRejected;
+            // Pending reliable entries become actual losses only when their
+            // physical connection is retired. Full-queue attempts that callers
+            // can retry remain a separate backpressure counter.
+            reliableDropped += snapshot.ReliableDropped + snapshot.PendingReliable;
+            ownerPurgedReliable += snapshot.OwnerPurgedReliable;
+            ownerPurgedLatest += snapshot.OwnerPurgedLatest;
+            reliableBurstYields += snapshot.ReliableBurstYields;
             dequeued += snapshot.Dequeued;
             maxPending = Math.Max(maxPending, snapshot.MaxPending);
         }
@@ -695,7 +706,12 @@ namespace ThreeUnity.Bridge
                 ReliableQueued = reliableQueued + current.ReliableQueued,
                 LatestQueued = latestQueued + current.LatestQueued,
                 LatestCoalesced = latestCoalesced + current.LatestCoalesced,
+                ReliableBackpressureRejected = reliableBackpressureRejected
+                    + current.ReliableBackpressureRejected,
                 ReliableDropped = reliableDropped + current.ReliableDropped,
+                OwnerPurgedReliable = ownerPurgedReliable + current.OwnerPurgedReliable,
+                OwnerPurgedLatest = ownerPurgedLatest + current.OwnerPurgedLatest,
+                ReliableBurstYields = reliableBurstYields + current.ReliableBurstYields,
                 Dequeued = dequeued + current.Dequeued,
                 PendingReliable = current.PendingReliable,
                 PendingLatest = current.PendingLatest,

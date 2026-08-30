@@ -162,9 +162,22 @@ namespace ThreeUnity.Bridge.Logic
                 + ",\"payload\":" + JsonUtility.ToJson(payload) + "}";
         }
 
+        public static ThreeUnityLogicOutgoingMessage EncodeMessage(
+            string type,
+            long sequence,
+            string sessionId,
+            object payload)
+        {
+            return new ThreeUnityLogicOutgoingMessage(
+                Encode(type, sequence, sessionId, payload),
+                type,
+                sessionId);
+        }
+
         private static string JsonString(string value)
         {
-            return JsonUtility.ToJson(new StringValue { value = value }).Substring(9, JsonUtility.ToJson(new StringValue { value = value }).Length - 10);
+            var encoded = JsonUtility.ToJson(new StringValue { value = value });
+            return encoded.Substring(9, encoded.Length - 10);
         }
 
         [Serializable]

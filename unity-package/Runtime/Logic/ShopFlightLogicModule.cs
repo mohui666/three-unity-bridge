@@ -4,7 +4,9 @@ using UnityEngine;
 
 namespace ThreeUnity.Bridge.Logic
 {
-    public sealed class ShopFlightLogicModule : IThreeUnityLogicModule, IThreeUnityLogicTelemetry
+    public sealed class ShopFlightLogicModule : IThreeUnityLogicModule,
+        IThreeUnityLogicOutgoingMetadata,
+        IThreeUnityLogicTelemetry
     {
         [Serializable]
         private sealed class HelloMessage { public HelloPayload payload; }
@@ -50,7 +52,7 @@ namespace ThreeUnity.Bridge.Logic
         [Serializable]
         private sealed class FallbackPayload { public string reason; }
 
-        private readonly Queue<string> outgoing = new Queue<string>();
+        private readonly Queue<ThreeUnityLogicOutgoingMessage> outgoing = new Queue<ThreeUnityLogicOutgoingMessage>();
         private readonly ShopFlightMotor motor = new ShopFlightMotor();
         private readonly ThreeUnityStateEmissionGate stateEmission = new ThreeUnityStateEmissionGate();
         private long outgoingSequence;
@@ -170,12 +172,23 @@ namespace ThreeUnity.Bridge.Logic
 
         public bool TryDequeueOutgoing(out string json)
         {
-            if (outgoing.Count == 0)
+            if (!TryDequeueOutgoingMessage(out var message))
             {
                 json = null;
                 return false;
             }
-            json = outgoing.Dequeue();
+            json = message.Json;
+            return true;
+        }
+
+        public bool TryDequeueOutgoingMessage(out ThreeUnityLogicOutgoingMessage message)
+        {
+            if (outgoing.Count == 0)
+            {
+                message = default;
+                return false;
+            }
+            message = outgoing.Dequeue();
             return true;
         }
 
@@ -215,7 +228,11 @@ namespace ThreeUnity.Bridge.Logic
             {
                 profile = Profile,
                 fixedDeltaTime = Time.fixedDeltaTime,
-                features = new[] { ThreeUnityLogicFeatures.SessionRestart },
+                features = new[]
+                {
+                    ThreeUnityLogicFeatures.SessionRestart,
+                    ThreeUnityLogicFeatures.RuntimeLifecycle,
+                },
             });
         }
 
@@ -260,7 +277,11 @@ namespace ThreeUnity.Bridge.Logic
 
         private void Enqueue(string type, object payload)
         {
-            outgoing.Enqueue(LogicEnvelopeWriter.Encode(type, outgoingSequence++, sessionId, payload));
+            outgoing.Enqueue(LogicEnvelopeWriter.EncodeMessage(
+                type,
+                outgoingSequence++,
+                sessionId,
+                payload));
         }
 
         private static string NormalizeSessionId(string value)

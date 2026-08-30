@@ -31,28 +31,52 @@ namespace ThreeUnity.Bridge.Tests
         [Test]
         public void LatestStateStreamKeysArePartitionedBySession()
         {
-            var method = typeof(ThreeUnityLogicBridge).GetMethod(
-                "LatestStreamKey",
-                BindingFlags.Static | BindingFlags.NonPublic);
-            Assert.That(method, Is.Not.Null);
-
-            var first = (string)method.Invoke(null, new object[]
-            {
-                new LogicEnvelopeHeader { sessionId = "session-a", type = "player.state" },
-            });
-            var second = (string)method.Invoke(null, new object[]
-            {
-                new LogicEnvelopeHeader { sessionId = "session-b", type = "player.state" },
-            });
-            var legacy = (string)method.Invoke(null, new object[]
-            {
-                new LogicEnvelopeHeader { type = "player.state" },
-            });
+            var first = new ThreeUnityLogicOutgoingMessage(
+                "{}",
+                "player.state",
+                "session-a").StreamKey;
+            var second = new ThreeUnityLogicOutgoingMessage(
+                "{}",
+                "player.state",
+                "session-b").StreamKey;
+            var legacy = new ThreeUnityLogicOutgoingMessage(
+                "{}",
+                "player.state",
+                null).StreamKey;
 
             Assert.That(first, Is.EqualTo("session-a:player.state"));
             Assert.That(second, Is.EqualTo("session-b:player.state"));
             Assert.That(first, Is.Not.EqualTo(second));
             Assert.That(legacy, Is.EqualTo("player.state"));
+        }
+
+        [Test]
+        public void PlayerFocusAndPauseCallbacksUpdateTheGenericLifecycleState()
+        {
+            var gameObject = new GameObject("logic-bridge-lifecycle-test");
+            var launcher = gameObject.AddComponent<ThreeUnityWebBridgeLauncher>();
+            var bridge = gameObject.AddComponent<ThreeUnityLogicBridge>();
+            bridge.Configure(launcher, "shop-flight-v1");
+            Invoke(bridge, "Awake");
+            var router = GetField<ThreeUnityLogicSessionRouter>(bridge, "router");
+            var initialRevision = router.ApplicationLifecycleRevision;
+            var nextFocus = !router.ApplicationFocused;
+
+            LogAssert.Expect(LogType.Log, new Regex("THREE_UNITY_RUNTIME_LIFECYCLE source=focus"));
+            Invoke(bridge, "OnApplicationFocus", nextFocus);
+            Assert.That(router.ApplicationFocused, Is.EqualTo(nextFocus));
+            Assert.That(router.ApplicationLifecycleRevision, Is.EqualTo(initialRevision + 1));
+
+            Invoke(bridge, "OnApplicationFocus", nextFocus);
+            Assert.That(router.ApplicationLifecycleRevision, Is.EqualTo(initialRevision + 1));
+
+            LogAssert.Expect(LogType.Log, new Regex("THREE_UNITY_RUNTIME_LIFECYCLE source=pause"));
+            Invoke(bridge, "OnApplicationPause", true);
+            Assert.That(router.ApplicationPaused, Is.True);
+            Assert.That(router.ApplicationActive, Is.False);
+            Assert.That(router.ApplicationLifecycleRevision, Is.EqualTo(initialRevision + 2));
+            LogAssert.NoUnexpectedReceived();
+            UnityEngine.Object.DestroyImmediate(gameObject);
         }
 
         [Test]
@@ -105,7 +129,7 @@ namespace ThreeUnity.Bridge.Tests
                 for (var index = 0; index < 1024; index++)
                     Assert.That(launcher.SendToWeb(firstLease, "filler-" + index), Is.True);
 
-                LogAssert.Expect(LogType.Warning, new Regex("THREE_UNITY_WEB_BRIDGE_RELIABLE_OVERFLOW"));
+                LogAssert.Expect(LogType.Warning, new Regex("THREE_UNITY_WEB_BRIDGE_RELIABLE_BACKPRESSURE"));
                 Invoke(bridge, "FlushOutgoing");
 
                 Assert.That(GetField<bool>(bridge, "hasPendingOutgoing"), Is.True);
@@ -162,7 +186,7 @@ namespace ThreeUnity.Bridge.Tests
                 for (var index = 0; index < 1024; index++)
                     Assert.That(launcher.SendToWeb(oldLease, "filler-" + index), Is.True);
 
-                LogAssert.Expect(LogType.Warning, new Regex("THREE_UNITY_WEB_BRIDGE_RELIABLE_OVERFLOW"));
+                LogAssert.Expect(LogType.Warning, new Regex("THREE_UNITY_WEB_BRIDGE_RELIABLE_BACKPRESSURE"));
                 Invoke(bridge, "FlushOutgoing");
                 Assert.That(GetField<string>(bridge, "pendingOutgoingJson"), Is.EqualTo(oldPending));
 
@@ -175,11 +199,13 @@ namespace ThreeUnity.Bridge.Tests
                 var newConnection = InstallConnection(launcher, newPage, newPipe, out _);
                 connections.Add(newConnection);
 
+                LogAssert.Expect(LogType.Log, new Regex(
+                    "THREE_UNITY_LOGIC_OUTBOUND_EPOCH_RETIRED.*reason=physical-generation.*retainedPendingDiscarded=1"));
                 LogAssert.Expect(LogType.Log, "THREE_UNITY_LOGIC_TRANSPORT_RESET page=" + newPage);
                 Assert.That(bridge.ResetForHostGeneration(newPage), Is.True);
                 Assert.That(GetField<bool>(bridge, "hasPendingOutgoing"), Is.False);
                 Assert.That(GetField<string>(bridge, "pendingOutgoingJson"), Is.Null);
-                Assert.That(router.RetiredOutgoingDiscarded, Is.EqualTo(1));
+                Assert.That(router.RetiredOutgoingDiscarded, Is.EqualTo(2));
                 Assert.That(modules, Has.Count.EqualTo(2));
 
                 var fresh = Message("fresh.command", 1);
@@ -196,6 +222,206 @@ namespace ThreeUnity.Bridge.Tests
             {
                 foreach (var connection in connections)
                     DisposeConnection(connection);
+                UnityEngine.Object.DestroyImmediate(gameObject);
+            }
+        }
+
+        [Test]
+        public void ReliablePendingRecoversCapacityOnSameConnectionWithoutLossOrDuplication()
+        {
+            var gameObject = new GameObject("logic-bridge-same-connection-retry-test");
+            var launcher = gameObject.AddComponent<ThreeUnityWebBridgeLauncher>();
+            var bridge = gameObject.AddComponent<ThreeUnityLogicBridge>();
+            object connection = null;
+            try
+            {
+                var lifecycle = GetLifecycle(launcher);
+                lifecycle.Start(0);
+                Assert.That(lifecycle.TryBeginLaunch(0, true, out var page, out var pipe), Is.True);
+                Assert.That(lifecycle.TryMarkConnected(page, pipe), Is.True);
+                connection = InstallConnection(launcher, page, pipe, out var lease);
+                var outbound = GetOutbound(connection);
+
+                var modules = new List<QueuedLogicModule>();
+                InstallQueuedRouter(bridge, launcher, modules);
+                var first = Message("test.command", 1);
+                var second = Message("test.command", 2);
+                modules[0].Enqueue(first);
+                modules[0].Enqueue(second);
+                for (var index = 0; index < 1024; index++)
+                    Assert.That(launcher.SendToWeb(lease, "filler-" + index), Is.True);
+
+                LogAssert.Expect(LogType.Warning, new Regex("THREE_UNITY_WEB_BRIDGE_RELIABLE_BACKPRESSURE"));
+                Invoke(bridge, "FlushOutgoing");
+                Assert.That(GetField<string>(bridge, "pendingOutgoingJson"), Is.EqualTo(first));
+
+                Assert.That(outbound.TryDequeue(out var firstFiller), Is.True);
+                Assert.That(firstFiller, Is.EqualTo("filler-0"));
+                LogAssert.Expect(LogType.Warning, new Regex("THREE_UNITY_WEB_BRIDGE_RELIABLE_BACKPRESSURE"));
+                Invoke(bridge, "FlushOutgoing");
+                Assert.That(GetField<string>(bridge, "pendingOutgoingJson"), Is.EqualTo(second));
+
+                var occurrencesOfFirst = 0;
+                for (var index = 1; index < 1024; index++)
+                {
+                    Assert.That(outbound.TryDequeue(out var filler), Is.True);
+                    Assert.That(filler, Is.EqualTo("filler-" + index));
+                }
+                Assert.That(outbound.TryDequeue(out var recoveredFirst), Is.True);
+                if (recoveredFirst == first)
+                    occurrencesOfFirst++;
+                Assert.That(occurrencesOfFirst, Is.EqualTo(1));
+                Assert.That(outbound.TryDequeue(out _), Is.False);
+
+                Invoke(bridge, "FlushOutgoing");
+                Assert.That(outbound.TryDequeue(out var recoveredSecond), Is.True);
+                Assert.That(recoveredSecond, Is.EqualTo(second));
+                Assert.That(outbound.TryDequeue(out _), Is.False);
+                Assert.That(GetField<bool>(bridge, "hasPendingOutgoing"), Is.False);
+                Assert.That(launcher.GetTransportMetrics().Outbound.ReliableBackpressureRejected, Is.EqualTo(2));
+                Assert.That(launcher.GetTransportMetrics().Outbound.ReliableDropped, Is.Zero);
+                LogAssert.NoUnexpectedReceived();
+            }
+            finally
+            {
+                DisposeConnection(connection);
+                UnityEngine.Object.DestroyImmediate(gameObject);
+            }
+        }
+
+        [Test]
+        public void LogicalRestartPurgesOldOwnerBacklogBeforeFreshReady()
+        {
+            var gameObject = new GameObject("logic-bridge-owner-restart-test");
+            var launcher = gameObject.AddComponent<ThreeUnityWebBridgeLauncher>();
+            var bridge = gameObject.AddComponent<ThreeUnityLogicBridge>();
+            object connection = null;
+            try
+            {
+                var lifecycle = GetLifecycle(launcher);
+                lifecycle.Start(0);
+                Assert.That(lifecycle.TryBeginLaunch(0, true, out var page, out var pipe), Is.True);
+                Assert.That(lifecycle.TryMarkConnected(page, pipe), Is.True);
+                connection = InstallConnection(launcher, page, pipe, out var lease);
+                var outbound = GetOutbound(connection);
+
+                var modules = new List<QueuedLogicModule>();
+                var router = InstallQueuedRouter(bridge, launcher, modules);
+                Invoke(bridge, "ProcessInboundWithLease", lease, Hello("session-a", 0));
+                Assert.That(router.ActiveSessionId, Is.EqualTo("session-a"));
+
+                var oldOwner = GetField<object>(bridge, "activeOutboundOwner");
+                Assert.That(
+                    launcher.SendLatestToWeb(lease, oldOwner, "session-a:test.state", "old-state"),
+                    Is.True);
+                for (var index = 0; index < 1025; index++)
+                    modules[0].Enqueue(Message("old.command", index));
+                for (var flush = 0; flush < 4; flush++)
+                    Invoke(bridge, "FlushOutgoing");
+                LogAssert.Expect(LogType.Warning, new Regex("THREE_UNITY_WEB_BRIDGE_RELIABLE_BACKPRESSURE"));
+                Invoke(bridge, "FlushOutgoing");
+                Assert.That(outbound.Snapshot().PendingReliable, Is.EqualTo(1024));
+                Assert.That(outbound.Snapshot().PendingLatest, Is.EqualTo(1));
+                Assert.That(GetField<bool>(bridge, "hasPendingOutgoing"), Is.True);
+
+                LogAssert.Expect(LogType.Log, new Regex(
+                    "THREE_UNITY_LOGIC_OUTBOUND_EPOCH_RETIRED.*purged=1025"));
+                LogAssert.Expect(LogType.Log, new Regex(
+                    "THREE_UNITY_LOGIC_SESSION_RESTART.*outboundPurged=1025"));
+                Invoke(
+                    bridge,
+                    "ProcessInboundWithLease",
+                    lease,
+                    Hello("session-b", 0, "session-a"));
+
+                Assert.That(router.ActiveSessionId, Is.EqualTo("session-b"));
+                Assert.That(router.RetiredOutgoingDiscarded, Is.EqualTo(1));
+                Assert.That(modules, Has.Count.EqualTo(2));
+                Assert.That(GetField<bool>(bridge, "hasPendingOutgoing"), Is.False);
+                Assert.That(GetField<object>(bridge, "activeOutboundOwner"), Is.Not.SameAs(oldOwner));
+                Assert.That(outbound.Snapshot().PendingReliable, Is.Zero);
+                Assert.That(outbound.Snapshot().PendingLatest, Is.Zero);
+
+                var ready = Message("bridge.ready", 0);
+                modules[1].Enqueue(ready);
+                Invoke(bridge, "FlushOutgoing");
+                Assert.That(outbound.TryDequeue(out var firstAfterRestart), Is.True);
+                Assert.That(firstAfterRestart, Is.EqualTo(ready));
+                Assert.That(outbound.TryDequeue(out _), Is.False);
+
+                var metrics = launcher.GetTransportMetrics().Outbound;
+                Assert.That(metrics.OwnerPurgedReliable, Is.EqualTo(1024));
+                Assert.That(metrics.OwnerPurgedLatest, Is.EqualTo(1));
+                Assert.That(metrics.ReliableBackpressureRejected, Is.EqualTo(1));
+                Assert.That(metrics.ReliableDropped, Is.Zero);
+                LogAssert.NoUnexpectedReceived();
+            }
+            finally
+            {
+                DisposeConnection(connection);
+                UnityEngine.Object.DestroyImmediate(gameObject);
+            }
+        }
+
+        [Test]
+        public void BurstFlushStopsAtBudgetAndPreservesRemainingOrder()
+        {
+            const int queuedMessages = 4096;
+            const int expectedPerFlush = 256;
+            var gameObject = new GameObject("logic-bridge-flush-budget-test");
+            var launcher = gameObject.AddComponent<ThreeUnityWebBridgeLauncher>();
+            var bridge = gameObject.AddComponent<ThreeUnityLogicBridge>();
+            object connection = null;
+            try
+            {
+                var lifecycle = GetLifecycle(launcher);
+                lifecycle.Start(0);
+                Assert.That(lifecycle.TryBeginLaunch(0, true, out var page, out var pipe), Is.True);
+                Assert.That(lifecycle.TryMarkConnected(page, pipe), Is.True);
+                connection = InstallConnection(launcher, page, pipe, out _);
+                var outbound = GetOutbound(connection);
+
+                var modules = new List<QueuedLogicModule>();
+                InstallQueuedRouter(bridge, launcher, modules);
+                for (var index = 0; index < queuedMessages; index++)
+                    modules[0].Enqueue(Message("burst.command", index));
+
+                Invoke(bridge, "FlushOutgoing");
+
+                Assert.That(outbound.Snapshot().PendingReliable, Is.EqualTo(expectedPerFlush));
+                Assert.That(modules[0].Pending, Is.EqualTo(queuedMessages - expectedPerFlush));
+                Assert.That(GetField<long>(bridge, "outboundFlushBudgetStops"), Is.EqualTo(1));
+                Assert.That(GetField<int>(bridge, "maxOutgoingMessagesPerFlush"), Is.EqualTo(expectedPerFlush));
+                for (var index = 0; index < expectedPerFlush; index++)
+                {
+                    Assert.That(outbound.TryDequeue(out var message), Is.True);
+                    Assert.That(message, Is.EqualTo(Message("burst.command", index)));
+                }
+
+                Invoke(bridge, "FlushOutgoing");
+
+                Assert.That(outbound.Snapshot().PendingReliable, Is.EqualTo(expectedPerFlush));
+                Assert.That(modules[0].Pending, Is.EqualTo(queuedMessages - (expectedPerFlush * 2)));
+                Assert.That(GetField<long>(bridge, "outboundFlushBudgetStops"), Is.EqualTo(2));
+                for (var index = expectedPerFlush; index < expectedPerFlush * 2; index++)
+                {
+                    Assert.That(outbound.TryDequeue(out var message), Is.True);
+                    Assert.That(message, Is.EqualTo(Message("burst.command", index)));
+                }
+                Assert.That(outbound.TryDequeue(out _), Is.False);
+
+                var benchmark = "THREE_UNITY_OUTBOUND_FLUSH_BENCHMARK"
+                    + " queued=" + queuedMessages
+                    + " firstFlush=" + expectedPerFlush
+                    + " remainingAfterFirst=" + (queuedMessages - expectedPerFlush)
+                    + " budgetStops=" + GetField<long>(bridge, "outboundFlushBudgetStops");
+                LogAssert.Expect(LogType.Log, benchmark);
+                Debug.Log(benchmark);
+                LogAssert.NoUnexpectedReceived();
+            }
+            finally
+            {
+                DisposeConnection(connection);
                 UnityEngine.Object.DestroyImmediate(gameObject);
             }
         }
@@ -227,6 +453,20 @@ namespace ThreeUnity.Bridge.Tests
             return LogicEnvelopeWriter.Encode(type, value, new TestPayload { value = value });
         }
 
+        private static string Hello(
+            string sessionId,
+            long sequence,
+            string previousSessionId = null)
+        {
+            var previous = previousSessionId == null
+                ? string.Empty
+                : ",\"previousSessionId\":\"" + previousSessionId + "\"";
+            return "{\"protocol\":1,\"sessionId\":\"" + sessionId
+                + "\",\"type\":\"bridge.hello\",\"seq\":" + sequence
+                + ",\"payload\":{\"gameId\":\"test-game\",\"capabilities\":[\"queued-test-v1\"]"
+                + previous + "}}";
+        }
+
         private static ThreeUnityWebBridgeLifecycle GetLifecycle(ThreeUnityWebBridgeLauncher launcher)
         {
             return GetField<ThreeUnityWebBridgeLifecycle>(launcher, "lifecycle");
@@ -253,8 +493,9 @@ namespace ThreeUnity.Bridge.Tests
                 },
                 null);
             lease = new ThreeUnityWebBridgeLease(
-                launcher,
-                connection,
+                launcherType.GetField("leaseIssuerIdentity", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .GetValue(launcher),
+                connectionType.GetProperty("LeaseIdentity").GetValue(connection),
                 pageGeneration,
                 connectionGeneration);
             connectionType.GetProperty("Lease").SetValue(connection, lease);

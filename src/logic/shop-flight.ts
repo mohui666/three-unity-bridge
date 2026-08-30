@@ -4,6 +4,14 @@ import {
   ReconnectBackoff,
   type ReconnectBackoffOptions,
 } from "./reconnect.js";
+import {
+  RUNTIME_LIFECYCLE_ACK_MESSAGE,
+  RUNTIME_LIFECYCLE_FEATURE,
+  RUNTIME_LIFECYCLE_STATE_MESSAGE,
+  RuntimeLifecycleGate,
+  type RuntimeLifecycleMetrics,
+  type RuntimeLifecycleState,
+} from "./lifecycle.js";
 
 export const SHOP_FLIGHT_PROFILE = "shop-flight-v1" as const;
 export const SESSION_RESTART_FEATURE = "session-restart-v1" as const;
@@ -48,13 +56,18 @@ export interface ShopFlightAuthorityOptions {
   applyState(state: ShopFlightState): void;
   runFallbackFrame(deltaTime: number): void;
   onAuthorityChange?(active: boolean, reason: string): void;
+  onRuntimeLifecycle?(state: RuntimeLifecycleState): void;
   reconnect?: ReconnectBackoffOptions;
 }
 
 export interface ShopFlightAuthority {
   readonly authorityActive: boolean;
   readonly generation: number;
+  readonly runtimeActive: boolean;
+  readonly runtimeLifecycle: RuntimeLifecycleState | undefined;
+  readonly runtimeLifecycleMetrics: RuntimeLifecycleMetrics;
   update(deltaTime: number): void;
+  runRuntimeFrame(work: () => void): boolean;
   requestFlying(flying: boolean): boolean;
   reset(): void;
   dispose(): void;
@@ -108,6 +121,7 @@ export function createShopFlightAuthority(options: ShopFlightAuthorityOptions): 
   let fallbackSessionHandled = false;
   let disposed = false;
   const reconnect = new ReconnectBackoff(options.reconnect);
+  const lifecycle = new RuntimeLifecycleGate({ onChange: options.onRuntimeLifecycle });
 
   const setAuthority = (active: boolean, reason: string): void => {
     if (authorityActive === active) return;
@@ -134,6 +148,7 @@ export function createShopFlightAuthority(options: ShopFlightAuthorityOptions): 
     fallbackSessionHandled = true;
     fallbackSessionId = client.sessionId;
     handshakeReady = false;
+    lifecycle.configure(false);
     generation++;
     lastStateTick = -1;
     let firstError: unknown;
@@ -181,6 +196,8 @@ export function createShopFlightAuthority(options: ShopFlightAuthorityOptions): 
       handshakeReady = true;
       supportsSessionRestart = Array.isArray(envelope.payload.features)
         && envelope.payload.features.includes(SESSION_RESTART_FEATURE);
+      lifecycle.configure(Array.isArray(envelope.payload.features)
+        && envelope.payload.features.includes(RUNTIME_LIFECYCLE_FEATURE));
       sendBootstrap();
     }),
     client.on("flight.state", envelope => {
@@ -210,13 +227,29 @@ export function createShopFlightAuthority(options: ShopFlightAuthorityOptions): 
         : "fallback";
       restoreLocalAuthority(reason);
     }),
+    client.on(RUNTIME_LIFECYCLE_STATE_MESSAGE, envelope => {
+      if (disposed || !handshakeReady || !client.ready) return;
+      const state = lifecycle.accept(envelope.payload);
+      if (state === undefined) return;
+      client.send(RUNTIME_LIFECYCLE_ACK_MESSAGE, {
+        revision: state.revision,
+        active: state.active,
+      });
+    }),
   ];
 
-  client.start(gameId, [SHOP_FLIGHT_PROFILE, SESSION_RESTART_FEATURE]);
+  client.start(gameId, [
+    SHOP_FLIGHT_PROFILE,
+    SESSION_RESTART_FEATURE,
+    RUNTIME_LIFECYCLE_FEATURE,
+  ]);
 
   return {
     get authorityActive(): boolean { return authorityActive; },
     get generation(): number { return generation; },
+    get runtimeActive(): boolean { return lifecycle.active; },
+    get runtimeLifecycle(): RuntimeLifecycleState | undefined { return lifecycle.state; },
+    get runtimeLifecycleMetrics(): RuntimeLifecycleMetrics { return lifecycle.metrics; },
     update(deltaTime: number): void {
       if (disposed) return;
       client.pollWatchdog();
@@ -227,6 +260,10 @@ export function createShopFlightAuthority(options: ShopFlightAuthorityOptions): 
         client.restart(reconnectReason);
       }
       if (!authorityActive) options.runFallbackFrame(deltaTime);
+    },
+    runRuntimeFrame(work: () => void): boolean {
+      if (typeof work !== "function") throw new TypeError("runtime frame work must be a function");
+      return lifecycle.run(work);
     },
     requestFlying(flying: boolean): boolean {
       if (!disposed && client.ready) {
@@ -245,6 +282,7 @@ export function createShopFlightAuthority(options: ShopFlightAuthorityOptions): 
       if (disposed) return;
       disposed = true;
       reconnect.cancel();
+      lifecycle.configure(false);
       let firstError: unknown;
       let hasError = false;
       const clean = (operation: () => void): void => {

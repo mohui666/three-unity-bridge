@@ -4,7 +4,11 @@ using UnityEngine;
 
 namespace ThreeUnity.Bridge.Logic
 {
-    public sealed class VoxelPlayerLogicModule : IThreeUnityLogicModule, IThreeUnityLogicTelemetry, IThreeUnityCollisionTelemetry, IThreeUnityInputTelemetry
+    public sealed class VoxelPlayerLogicModule : IThreeUnityLogicModule,
+        IThreeUnityLogicOutgoingMetadata,
+        IThreeUnityLogicTelemetry,
+        IThreeUnityCollisionTelemetry,
+        IThreeUnityInputTelemetry
     {
         public const string CollisionDeltaFeature = "collision-delta-v2";
 
@@ -96,7 +100,7 @@ namespace ThreeUnity.Bridge.Logic
         [Serializable]
         private sealed class CollisionResyncPayload { public int revision; }
 
-        private readonly Queue<string> outgoing = new Queue<string>();
+        private readonly Queue<ThreeUnityLogicOutgoingMessage> outgoing = new Queue<ThreeUnityLogicOutgoingMessage>();
         private readonly VoxelCollisionWindow collision = new VoxelCollisionWindow();
         private readonly VoxelPlayerMotor motor = new VoxelPlayerMotor();
         private readonly ThreeUnityStateEmissionGate stateEmission = new ThreeUnityStateEmissionGate(0.2f, 1f / 30f);
@@ -273,12 +277,23 @@ namespace ThreeUnity.Bridge.Logic
 
         public bool TryDequeueOutgoing(out string json)
         {
-            if (outgoing.Count == 0)
+            if (!TryDequeueOutgoingMessage(out var message))
             {
                 json = null;
                 return false;
             }
-            json = outgoing.Dequeue();
+            json = message.Json;
+            return true;
+        }
+
+        public bool TryDequeueOutgoingMessage(out ThreeUnityLogicOutgoingMessage message)
+        {
+            if (outgoing.Count == 0)
+            {
+                message = default;
+                return false;
+            }
+            message = outgoing.Dequeue();
             return true;
         }
 
@@ -318,7 +333,12 @@ namespace ThreeUnity.Bridge.Logic
             {
                 profile = Profile,
                 fixedDeltaTime = Time.fixedDeltaTime,
-                features = new[] { CollisionDeltaFeature, ThreeUnityLogicFeatures.SessionRestart },
+                features = new[]
+                {
+                    CollisionDeltaFeature,
+                    ThreeUnityLogicFeatures.SessionRestart,
+                    ThreeUnityLogicFeatures.RuntimeLifecycle,
+                },
                 stateRateHz = 30f,
             });
         }
@@ -420,7 +440,11 @@ namespace ThreeUnity.Bridge.Logic
 
         private void Enqueue(string type, object payload)
         {
-            outgoing.Enqueue(LogicEnvelopeWriter.Encode(type, outgoingSequence++, sessionId, payload));
+            outgoing.Enqueue(LogicEnvelopeWriter.EncodeMessage(
+                type,
+                outgoingSequence++,
+                sessionId,
+                payload));
         }
 
         private static string NormalizeSessionId(string value)
