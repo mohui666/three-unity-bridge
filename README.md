@@ -1,253 +1,333 @@
-# Three Unity Bridge
+<p align="center">
+  <img src="docs/assets/three-unity-bridge-hero.svg" alt="Three Unity Bridge — preserve the web, move the right runtime" width="100%">
+</p>
 
-把 Three.js 内容接入 Unity 并打包为 Player。既支持把场景转换成 Unity 资产，也支持用 Web Bridge 原样承载完整网页游戏。
+<h1 align="center">Three Unity Bridge</h1>
 
-这个仓库包含两部分：
+<p align="center">
+  <strong>保留 Web 的完整体验，把适合的运行时职责交给 Unity。</strong>
+</p>
 
-- `three-unity-bridge`：Three.js/Node.js 导出库与 CLI。
-- `com.three-unity.bridge`：Unity UPM 包，提供 `.threeunity` 导入器和 Web Bridge 启动组件。
-- `ThreeUnityWebHost`：Windows WebView2 宿主，把原版 Web 游戏嵌入 Unity Player，并提供 JS/Unity 双向消息通道。
+<p align="center">
+  将受支持的 Three.js 场景、动画与 Morph Target 转换为 Unity 原生资产，<br>
+  或把原始 Web 游戏原样封装进 Windows Player，再按需把确定性逻辑交给 Unity。
+</p>
 
-开发与打包要求：Node.js 20+、.NET 8 SDK、Unity Editor；Web Bridge 生成的 Windows Player 还需要系统安装 WebView2 Evergreen Runtime。
+<p align="center">
+  <img src="https://img.shields.io/badge/.threeunity-v3-7C3AED?style=flat-square" alt=".threeunity format v3">
+  <img src="https://img.shields.io/badge/UPM-0.1.0-2563EB?style=flat-square&logo=unity" alt="UPM 0.1.0">
+  <img src="https://img.shields.io/badge/Unity-2021.3%2B-111827?style=flat-square&logo=unity" alt="Unity 2021.3 or newer">
+  <img src="https://img.shields.io/badge/Node.js-20%2B-15803D?style=flat-square&logo=nodedotjs" alt="Node.js 20 or newer">
+  <img src="https://img.shields.io/badge/Web_Bridge-Windows_%C2%B7_WebView2-0891B2?style=flat-square&logo=windows11" alt="Windows WebView2">
+  <img src="https://img.shields.io/badge/License-MIT-F59E0B?style=flat-square" alt="MIT License">
+</p>
 
-## 当前可用闭环
+<p align="center">
+  <a href="#选择你的路径">选择路径</a> ·
+  <a href="#架构">架构</a> ·
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#能力矩阵">能力矩阵</a> ·
+  <a href="#已验证证据">验证证据</a> ·
+  <a href="#明确边界">明确边界</a>
+</p>
 
-1. 在 Three.js 中构建静态场景、带 Skeleton/AnimationClip 的 `SkinnedMesh`，或带 morph target 动画的 Mesh。
-2. 调用 `exportThreeUnityJson(scene)` 生成一个 `.threeunity` JSON 资产。
-3. 在 Unity 项目中安装 `unity-package`。
-4. 把 `.threeunity` 放进 Unity 的 `Assets/`。
-5. Unity 自动生成一个可拖入 Scene 的 Prefab 型资产；它引用的 Mesh、Material 和 Texture 都作为子资产保存，因此会正常进入 Player Build。
+> [!IMPORTANT]
+> 一个桥，两种迁移策略：需要 Unity 原生资产时转换；需要完整网页保真时承载。两条路径都强调清晰的所有权边界，而不是用低保真近似替代原项目。
 
-## 快速试用
+## 选择你的路径
+
+| | 资产转换 | Web Bridge |
+|---|---|---|
+| 最适合 | 需要 Unity Prefab、Mesh、Collider、Controller 的场景 | 必须保留原版画面、DOM UI、输入、音频和存档的完整游戏 |
+| 渲染 | 将受支持的 Three.js 数据重建为 Unity 原生资产 | 继续使用原版 Three.js / WebGPU / WebGL |
+| 游戏逻辑 | 任意 JavaScript 不会自动转换 | 原 JavaScript 默认保留；合适的职责可通过 profile 交给 Unity |
+| 主要产物 | `.threeunity`、Prefab 型资产、子资产、Playable Scene | Windows Unity Player、原始 `dist`、嵌入式 WebView2 Host |
+| 入口命令 | `build-unity` | `build-web-unity` |
+
+### 路径 A：Unity 原生资产
+
+导出器读取 Three.js Scene/Object3D，把受支持的层级、Mesh、材质、纹理、Camera、Light、Skin、动画与 Morph Target 写入版本化 `.threeunity`。Unity `ScriptedImporter` 再生成可拖入 Scene 的 Prefab 型主资产，以及 Mesh、Material、Texture、AnimationClip 等子资产。
+
+### 路径 B：完整 Web 体验
+
+Web Bridge 把源 `dist` 的内容和相对路径原样放入 `StreamingAssets`，由 Windows WebView2 Host 嵌入 Unity Player 窗口。DOM、CSS、Three.js 渲染、输入、音频、持久化与浏览器 fallback 仍由原网页拥有；Unity 只接管明确协商的运行时职责。
+
+## 架构
+
+```mermaid
+flowchart LR
+  subgraph Asset["路径 A · 原生资产转换"]
+    Scene["Three.js Scene"] --> Exporter["TypeScript Exporter / CLI"]
+    Exporter --> Document[".threeunity v3"]
+    Document --> Importer["Unity ScriptedImporter"]
+    Importer --> Assets["Prefab · Mesh · Material<br/>AnimationClip · BlendShape"]
+    Assets --> NativePlayer["Unity Player"]
+  end
+
+  subgraph Web["路径 B · Web Bridge"]
+    Dist["原始 Web dist"] --> Pack["build-web-unity"]
+    Pack --> Streaming["StreamingAssets<br/>保留内容与相对路径"]
+    Streaming --> Host["Windows WebView2 Host"]
+    Host --> WebPlayer["Unity Player Window"]
+    Host <-->|"命名管道 · 版本化协议"| Runtime["Unity Runtime"]
+    Runtime --> Profiles["可选 Logic Profiles"]
+  end
+
+  classDef source fill:#0f172a,stroke:#22d3ee,color:#f8fafc;
+  classDef bridge fill:#18112e,stroke:#8b5cf6,color:#f8fafc;
+  classDef unity fill:#111827,stroke:#60a5fa,color:#f8fafc;
+  class Scene,Dist source;
+  class Exporter,Document,Pack,Streaming,Host bridge;
+  class Importer,Assets,NativePlayer,WebPlayer,Runtime,Profiles unity;
+```
+
+- Asset Path 让 Unity 拥有受支持的渲染资产、动画、碰撞与控制器。
+- Web Path 继续让浏览器拥有 DOM、CSS、Three.js 渲染、输入、音频与持久化。
+- Logic Profile 只迁移适合固定步长和确定性执行的职责。
+- 通用 Runtime 与 Host 不按游戏名称分支；项目差异留在 profile 和薄适配层。
+
+## 能力矩阵
+
+| 能力 | 资产转换 | Web Bridge |
+|---|:---:|:---:|
+| Mesh、Submesh、Normal、UV、Vertex Color | ✅ Unity 原生资产 | ✅ 原版 Web 渲染 |
+| 基础材质与可嵌入纹理 | ✅ | ✅ 原样保留 |
+| Perspective / Orthographic Camera、Light | ✅ | ✅ 原样保留 |
+| Skeleton、四权重 Skinning、Bind Pose | ✅ Format v2+ | ✅ 原样保留 |
+| Position / Quaternion / Scale 动画 | ✅ Format v2+ | ✅ 原样保留 |
+| Morph Target / Unity BlendShape | ✅ Format v3 | ✅ 原样保留 |
+| DOM / CSS UI | — | ✅ |
+| 原 JavaScript 游戏逻辑 | — | ✅ |
+| 输入、音频、存档 | 不自动转换 | ✅ |
+| Unity Collider / Controller | ✅ Runtime Profile | 可选 |
+| Unity 权威逻辑 | 通过项目组件实现 | ✅ 可选 Logic Profile |
+| 项目 C# 组件绑定 | ✅ 显式注册 | 可通过协议集成 |
+| 输出平台 | Unity 资产；CLI Player 构建当前为 Windows | Windows + WebView2 |
+
+## 快速开始
+
+### 环境
+
+- Node.js 20+
+- Three.js `>= 0.160.0 < 1`
+- Unity Editor；UPM 声明兼容 Unity 2021.3+
+- Web Bridge 额外需要 .NET 8 SDK 与 WebView2 Evergreen Runtime
+- 当前仓库验证环境：Unity `6000.3.22f1`
+
+### 最短路径体验 Morph Target → BlendShape
 
 ```powershell
 npm install
-npm run example
-npm run example:animated
 npm run example:morph
-npm run example:components
-npx three-unity install-unity C:\Path\To\UnityProject
-npx three-unity copy .\examples\output\three-unity-demo.threeunity C:\Path\To\UnityProject
-npx three-unity build-unity .\scene.threeunity C:\Path\To\UnityProject
+node .\dist\cli.js validate .\examples\output\morph-target-animation.threeunity
 ```
 
-也可以在 Unity Package Manager 中选择 **Add package from disk**，打开：
+这会生成 `examples/output/morph-target-animation.threeunity`：包含 `Bulge`、`Twist` 两个 Morph Target、初始权重与循环 morph-weight 动画。
 
-```text
-unity-package/package.json
+把 UPM 包和资产安装到已有 Unity 项目：
+
+```powershell
+node .\dist\cli.js install-unity C:\Path\To\UnityProject
+node .\dist\cli.js copy `
+  .\examples\output\morph-target-animation.threeunity `
+  C:\Path\To\UnityProject
 ```
 
-导入后，选中 `.threeunity` 可在 Inspector 中决定是否导入 Camera、Light、MeshCollider。
-也可以从 Unity Package Manager 的 **Samples** 导入 `Imported Triangle`、`Animated Skinned Mesh`、`Morph Target Animation` 或 `Component Binding Door`。两个动画示例会分别循环播放真实蒙皮弯曲和 BlendShape 变形；门示例会把 descriptor 显式绑定为 sample 自己的 `Door` MonoBehaviour，并在 Play 后自动开门。
+也可以在 Unity Package Manager 选择 **Add package from disk**，打开 `unity-package/package.json`，再从 **Samples** 导入示例。
 
-## Three.js 代码接入
+### 从 Three.js 代码导出
 
 ```ts
-import { exportThreeUnityJson, downloadThreeUnity } from "three-unity-bridge";
+import { writeFile } from "node:fs/promises";
+import { exportThreeUnityJson } from "three-unity-bridge";
 
 const json = await exportThreeUnityJson(scene, {
   name: "Level 01",
   unitScaleMeters: 1,
-  // Three.js cameras are often passed directly to renderer.render() and are
-  // not children of scene. Include those detached render objects explicitly.
   extraObjects: [gameCamera],
-});
-
-downloadThreeUnity(json, "level-01.threeunity");
-```
-
-Node.js 中可直接把返回字符串写入文件。浏览器纹理会被转成 PNG data URL，`DataTexture` 会以 RGBA8 内嵌。
-
-### 骨骼动画导出
-
-格式 v2 会把 `SkinnedMesh` 的骨骼顺序、稳定 node id、四权重、bind pose 和本地变换动画一起写入。未显式传入 `animations` 时默认读取 `root.animations`；动画以固定采样率烘焙为 position/quaternion/scale 轨道，导出结束后恢复调用方的变换。
-
-```ts
-const json = await exportThreeUnityJson(scene, {
   animations: clips,
   defaultAnimation: "Walk",
   autoplayAnimation: true,
   animationLoop: true,
   animationSampleRate: 30,
 });
+
+await writeFile("level-01.threeunity", json, "utf8");
 ```
 
-Unity importer 继续接受 v1 静态资产和 v2 蒙皮/Transform 动画资产；v2 蒙皮节点生成 `SkinnedMeshRenderer`，动画作为 `AnimationClip` 子资产保存，并由根对象上的 `ThreeUnityAnimationPlayer` 默认播放。运行时也可调用 `player.Play("Walk")` 按名称切换已导入片段。
+浏览器环境可改用 `downloadThreeUnity(json, "level-01.threeunity")`。`extraObjects` 用于保留未挂在 Scene 树下、但实际参与渲染的 Camera 等对象。
 
-### Morph Target / BlendShape 动画导出
-
-格式 v3 会把 `BufferGeometry.morphAttributes.position`（以及存在时的 normal）统一导出为相对基础网格的 delta，同时保留每个 Mesh 实例的 `morphTargetInfluences`。无论 Three.js 源 geometry 使用 absolute 还是 `morphTargetsRelative = true`，Unity 都会得到顺序和名称稳定的 BlendShape。morph-only Mesh 与 skin + morph Mesh 都使用 `SkinnedMeshRenderer`，初始 influence 和动画值在 Unity 中按百分比应用。
-
-`AnimationClip` 中的 `.morphTargetInfluences`、按 index 或按 name 的轨道会沿用固定采样流程烘焙成 `morphWeight` scalar 轨道；每条轨道用 node id 与 target index 关联，Unity 导入后绑定到真实的 `blendShape.<name>` 曲线。导出结束后调用方的 Transform 和全部 morph influence 都会恢复。
+### 构建原生资产 Player
 
 ```powershell
-npm run example:morph
-node .\dist\cli.js validate .\examples\output\morph-target-animation.threeunity
-```
-
-从 UPM 导入 `Morph Target Animation` Sample，把生成资产拖入 Scene 后进入 Play，即可看到 `Bulge` 与 `Twist` 组成的连续循环变形；不需要 Animator Controller 或额外 Sample 脚本。
-
-## 数据驱动的可玩转换
-
-导出器可以把 Unity 运行时配置一起写进 `.threeunity`。游戏差异只存在于一小段 Three.js 适配数据中，Unity importer 和运行时代码不按游戏名称分支：
-
-```ts
-const json = await exportThreeUnityJson(scene, {
-  extraObjects: [camera],
-  runtime: {
-    controller: "first-person",
-    colliderMode: "mesh",
-    enableBlockEditing: true,
-    allowFly: true,
-    hudStyle: "voxel-hotbar",
-    hotbar: blockTypes.map(({ name, color }) => ({ name, color })),
-  },
-});
-```
-
-Unity 导入后选中该 `.threeunity`，执行 **Assets > Three Unity > Create Playable Scene**。通用 builder 会根据配置生成碰撞体、相机、控制器和 HUD，不需要为每个游戏再写 Unity 建场脚本。
-
-需要直接打包时可跳过 Unity 手工操作：
-
-```powershell
-npx three-unity build-unity .\little-cubes.threeunity C:\Path\To\UnityProject `
+npm run example
+node .\dist\cli.js build-unity `
+  .\examples\output\three-unity-demo.threeunity `
+  C:\Path\To\UnityProject `
   --unity "C:\Program Files\Unity\Hub\Editor\6000.3.22f1\Editor\Unity.exe" `
-  -o .\Build\LittleCubes.exe
+  -o .\Build\ThreeUnityDemo.exe
 ```
 
-该命令会安装/更新 bridge 包、复制转换资产、按 runtime profile 自动生成 Scene，并调用 Unity 批处理构建 Windows Player。
+这里改用自带 Camera 与 Light 的静态示例，确保生成的 Player 有可见首帧。`build-unity` 会安装/更新 UPM 包、复制资产、生成 Playable Scene，并构建 `StandaloneWindows64` Player。
 
-如果目标是保持原版网页游戏的画面、DOM UI、JavaScript 逻辑和存档，使用 Web Bridge 模式：
+### 构建 Web Bridge Player
 
 ```powershell
-npx three-unity build-web-unity .\dist C:\Path\To\UnityProject `
-  --name LittleCubes `
-  -o .\Build\LittleCubesWebBridge\LittleCubesWebBridge.exe
+npm run build
+node .\dist\cli.js build-web-unity `
+  C:\Path\To\WebGame\dist `
+  C:\Path\To\UnityProject `
+  --name MyGame `
+  -o .\Build\MyGame\MyGame.exe
 ```
 
-Web Bridge 会把原始 `dist` 不改内容地复制进 Unity `StreamingAssets`，发布一个 WebView2 宿主，并将其嵌入 Unity Player 窗口。`window.chrome.webview.postMessage(...)` 发出的消息会通过命名管道送到 `ThreeUnityWebBridgeLauncher`，Unity 也可以用 `SendToWeb` 反向发送消息。省略 `-o` 时，CLI 默认输出到 Unity 项目的 `Build/<name>/<name>.exe`，整个 `<name>` 目录可以直接压缩分发。
+可选参数包括 `--entry index.html`、`--unity Unity.exe`，以及 `--logic-profile voxel-player-v1|shop-flight-v1`。
 
-### 可复用的 Unity 权威逻辑
+## `.threeunity` 格式与转换规则
 
-`build-web-unity` 默认只负责原样打包；加上 `--logic-profile` 后，同一个 Player 还会启用对应的 Unity C# 逻辑模块。Web 侧用 `three-unity-bridge/logic` 的版本化协议客户端连接，不需要针对游戏改宿主、CLI 或 Unity 建场脚本：
+| 格式 | 能力 | 兼容状态 |
+|---|---|---|
+| v1 | 静态层级、Mesh、材质、纹理、Camera、Light | importer 继续接受 |
+| v2 | SkinnedMesh、四权重、Bind Pose、Transform Animation | importer 继续接受 |
+| v3 | Morph Target delta、初始 morph weights、morphWeight Animation | 当前 exporter 输出 |
 
-```powershell
-npx three-unity build-web-unity .\dist C:\Path\To\UnityProject `
-  --name NameToShopLogicBridge `
-  --logic-profile shop-flight-v1 `
-  -o .\Build\NameToShopLogicBridge\NameToShopLogicBridge.exe
-```
+> [!NOTE]
+> npm 与 UPM 元数据当前仍为 `0.1.0`；格式版本、ScriptedImporter revision 与软件版本是三套独立概念。
 
-当前内置 profile：
+关键规则：
 
-- `voxel-player-v1`：Unity 负责玩家移动、跳跃/飞行与体素碰撞，Web 保留 Three.js 渲染和 UI。
-- `shop-flight-v1`：Unity 负责店铺起飞/降落缓动、飞行时钟、位置与旋转，Web 保留店铺生成、WebGPU/WebGL 渲染、DOM HUD、相机、音频、导出和存档。
+- Three.js 与 Unity 都是 Y-up，但手性不同；importer 镜像 Z，并把每个三角形绕序反转一次。
+- `unitScaleMeters` 应用于位置、position morph delta、Camera 裁剪面和 Light range，不应用于 normal delta。
+- Skin、Bone、动画目标和 Morph 动画以稳定 node id / target index 关联，不依赖名称唯一。
+- Three.js absolute / relative Morph Target 在导出时统一规范为 delta；Unity 不猜测源语义。
+- 动画通过固定采样 `AnimationMixer` 烘焙；导出后恢复调用方 Transform 与全部 morph influences。
+- 有 Skin 或 Morph Target 的 Mesh 使用 `SkinnedMeshRenderer`；skin + morph 共用同一个 Renderer。
+- Unity 动画作为 legacy `AnimationClip` 子资产导入，由 `ThreeUnityAnimationPlayer` 循环播放，不额外建设 Animator Controller。
 
-游戏侧只需一个薄适配层：提供当前快照、把 Unity 状态应用回 Three.js，以及保留原 JavaScript 帧函数作为回退。通用握手、序列号、generation 隔离、首状态超时和运行中 watchdog 都在 SDK 中。每次连接使用独立的紧凑随机 `sessionId`；fallback 是不可被迟到状态重新打开的粘滞边界。只有 Unity 的 `ready.features` 明确声明 `session-restart-v1` 时，适配器才会自动重连、重建 Unity 模块并从当前 JavaScript 快照重新 bootstrap；未声明该能力时保持 JavaScript 回退，不进行无效重试。可复制的接入文件见 [`examples/logic-adapters/name-to-shop/unity-flight-adapter.js`](examples/logic-adapters/name-to-shop/unity-flight-adapter.js)。Unity 未启用 profile、WebView2 不可用、协议不匹配或状态中断时，适配器会继续/恢复原 JavaScript 逻辑。
+## 可运行示例
 
-可选的 `runtime-lifecycle-v1` 把 Unity Player 的聚焦/暂停状态桥接给网页，而不是依赖嵌入 WebView 不可靠的可见性事件。Unity 只会在双方声明能力、当前会话 `bridge.ready` 已先发出后发送 `runtime.lifecycle.state`；快速变化按会话只保留最新状态，网页用 `runtime.lifecycle.ack` 确认。`RuntimeLifecycleGate` 默认始终运行，只有收到合法的新 revision 才暂停昂贵帧；未协商、旧包、坏消息或回调异常都会安全恢复原网页执行。name-to-shop 用它跳过后台 tween、场景更新和渲染并暂停 Web Audio，恢复时不补跑积压帧；DOM UI、原版 Three.js 渲染和 JavaScript fallback 并未转写到 Unity。
+| npm script | 输出 | UPM Sample | 展示内容 |
+|---|---|---|---|
+| `npm run example` | `three-unity-demo.threeunity` | Imported Triangle | 静态层级与最小 importer 闭环 |
+| `npm run example:animated` | `animated-skinned-mesh.threeunity` | Animated Skinned Mesh | Bone、Skinning、Bind Pose 与循环 AnimationClip |
+| `npm run example:morph` | `morph-target-animation.threeunity` | Morph Target Animation | `Bulge` / `Twist` BlendShape 与 morph-weight 动画 |
+| `npm run example:components` | `component-binding-door.threeunity` | Component Binding Door | descriptor 显式绑定项目自有 `Door` MonoBehaviour |
 
-兼容方向是单向保守的：新版 Unity 包仍接受没有 `sessionId` 的旧版 Web 客户端；但使用会话隔离的新版 SDK 连接旧版 Unity 包时，不会接受缺少匹配 `sessionId` 的回复，也不会进入 Unity 权威状态，而是在握手超时后安全留在原 JavaScript 逻辑。要启用会话重建，应同时升级 Web SDK 和 Unity 包；旧客户端兼容不等于支持 `session-restart-v1`。
+四个 Sample 都随 UPM 包提供，可从 Package Manager 的 Samples 页面直接导入。动画 Sample 拖入 Scene 后进入 Play 即可运行，不需要额外 Animator Controller。
 
-这条链路转换的是已支持的运行时语义；任意 JavaScript 逻辑仍不能自动翻译为 C#，需要映射到现有 profile 或新增一个可复用的 SDK 适配器与 Unity 模块。
+## Web Bridge 运行时
 
-### 性能、背压与遥测
+### 核心设计契约
 
-Unity→Web 的管道写入由专用后台线程完成，不阻塞 Unity 的 `Update` / `FixedUpdate`。控制类消息进入有界可靠队列；`*.state` 之类的实时流按 `sessionId + 消息类型` 只保留最新值。逻辑会话切换时会原子清除旧 owner 的可靠消息和 latest 状态；连续发送 32 条可靠消息后强制让出一次 latest 槽位，避免实时状态永久饿死。队列满表示可重试的 `backpressure`，只有连接退役时仍未送达的可靠消息才计入 `dropped`。
+- 源 `dist` 的文件内容和相对路径保持不变，不用视觉近似替代原游戏。
+- 协议版本化并按逻辑 session 隔离；旧 session 的迟到消息不能重新取得控制权。
+- Reliable 消息保序；Realtime 状态按 `sessionId + type` 有界合并，二者不会永久互相饿死。
+- Pipe 与 WebView I/O 不阻塞 Unity 主线程。
+- Unity→Web 启动消息同时等待 navigation 与当前 document 的 listener ACK。
+- Host 在创建 WebView 子进程前加入 Windows Job；替换代际串行，Player 退出后不遗留子进程。
+- 通用 Runtime 与 Host 不按游戏名称分支。
 
-内置逻辑模块在序列化协议包时会把已知的 `type`、`sessionId` 与 JSON 一起排队，Bridge 不再为了判断 reliable/latest 和 stream key 而在 Unity 主线程反序列化自己刚生成的 JSON。只实现旧接口的第三方模块仍能使用，路由器会为它们保留一次兼容解析；`metadataFast` 与 `metadataFallback` 分别记录两条路径。每次 `FlushOutgoing` 最多接受 256 条消息，模块突发输出的余量保序留到后续 Unity 回调，避免一帧内把整条 1,024 容量队列搬满。
+### 可复用 Logic Profiles
 
-WebView Host 使用单一异步写入泵保证 Web→Unity 消息顺序，并把 Unity→Web 的 UI 投递按批次合并，两个方向都设有 1,024 条硬上限。页面导航完成只证明原站可显示；Unity→Web 消息必须同时等到当前 document 的 WebView listener ACK。新 document 会重置监听 latch，并忽略被重定向替代的旧导航 completion；hash/pushState 不创建 document，因此不会误触发 Host 重启。每个 Host 在创建 WebView2 子进程前先加入 Windows Job，退役时只有 Job 报告 `ActiveProcessCount=0` 才允许启动下一代，首次 `TerminateJobObject` 失败会节流重试。
+- `voxel-player-v1`：Unity 负责玩家移动、跳跃/飞行与体素碰撞；Web 保留 Three.js 渲染和 UI。
+- `shop-flight-v1`：Unity 负责起飞/降落缓动、飞行时钟、位置与旋转；Web 保留内容生成、渲染、DOM HUD、音频、导出和存档。
 
-内置逻辑模块还使用通用状态发送门：状态变化时立即发送，状态不变时抑制重复快照，并每 200ms 保留一次低频心跳以满足 500ms watchdog。Web→Unity 可复用 `RealtimeInputGate`，把渲染帧输入变成“数字边沿立即发送、模拟量限频、静止心跳”，并可合并保留单帧动作；Unity 端的 `ThreeUnityInputFreshnessGate` 会在心跳中断后清除旧的移动/跳跃状态，防止 WebView 卡住时角色持续失控。
+游戏侧只需要薄适配层：提供当前快照、把 Unity 状态应用回 Three.js，并保留原 JavaScript 帧函数作为 fallback。可复制入口见 [`examples/logic-adapters/name-to-shop/unity-flight-adapter.js`](examples/logic-adapters/name-to-shop/unity-flight-adapter.js)。
 
-Player 每 120 个物理帧输出一条 `THREE_UNITY_BRIDGE_PERF`，包含收发消息/字符数、合并数、可靠队列背压、实际丢失、owner 清理、公平调度、当前/历史最大积压，以及状态发送、抑制、心跳、会话重建、拒绝、元数据快路径、flush 预算和生命周期发送/确认计数。Web 侧 `LogicClient.metrics` 提供对应的消息量、字符量、最新值合并、过期序列/异会话/终态尾包拒绝、协议错误、回退和重连计数。
+## 显式组件绑定
 
-`name-to-shop` 的同机实测中，静止商店跑到 240 个 Unity 物理帧时，Unity→Web 从 184 条 / 40,166 字符降到 20 条 / 4,262 字符，分别减少 89.1% 和 89.4%。重建后的实体 Player 报告 `metadataFast=21 metadataFallback=0 flushBudgetStops=0 maxFlush=2 lifecycleEmitted=2 lifecycleAck=2 lifecycleAckRejected=0`。LittleCubes 的 session-aware 240 FPS 输入基准把 Web→Unity 消息从 2,400 条降到 140 条（94.2%），协议字符减少 93.9%；真实 Player 的空闲输入由 180 条/秒降到约 4 条/秒，且 `dropped=0`。体素窗口复用使碰撞采样减少 90.8%，计入每条消息的 `sessionId` 后，`collision-delta-v2` 仍使协议字符减少 45.2%。Unity `6000.3.22f1` 的真实故障注入已分别验证两个 profile：LittleCubes 在输入失效后完成一次会话重建、新会话 ready 和后续逻辑 tick；name-to-shop 在 Web 请求回退后同样完成一次重建、新 ready、生命周期重新确认和后续 tick。两次运行都没有遗留孤儿 Host，性能标记均为 `dropped=0`。关闭 Player 后，嵌入式 WebView Host 在先前实测中于 140ms 内随父进程退出。测试方法、日志字段和扩展规则见 [`docs/BRIDGE_PERFORMANCE.md`](docs/BRIDGE_PERFORMANCE.md)。
-
-## 把组件描述绑定为项目 C# 类型
-
-Three.js 的 `userData.unity.components` 会以 `type + dataJson` 保留到 Unity 的 `ThreeUnityMetadata`：
+Three.js 的 `userData.unity.components` 会以 `type + dataJson` 保留到 Unity：
 
 ```ts
 doorPivot.userData = {
   unity: {
     components: [
-      {
-        type: "Door",
-        data: { openAngle: 95, duration: 0.45, startsOpen: false },
-      },
+      { type: "Door", data: { openAngle: 95, duration: 0.45 } },
     ],
   },
 };
 ```
 
-项目用精确字符串显式登记允许创建的类型；包不会反射程序集、猜测类型名或在导入阶段执行 binder：
+项目必须显式注册允许创建的 C# 类型；包不会扫描程序集或猜测类名：
 
 ```csharp
-using System;
-using ThreeUnity.Bridge;
-using UnityEngine;
-
-[Serializable]
-public sealed class DoorData
-{
-    public float openAngle;
-    public float duration;
-    public bool startsOpen;
-}
-
-public static class DoorBindings
-{
-    [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
-    private static void RegisterBindings()
-    {
-        ThreeUnityComponentBindings.Register<DoorData, Door>(
-            "Door",
-            (door, data) => door.Configure(data.openAngle, data.duration, data.startsOpen));
-    }
-}
+ThreeUnityComponentBindings.Register<DoorData, Door>(
+    "Door",
+    (door, data) => door.Configure(data.openAngle, data.duration, data.startsOpen));
 ```
 
-只要文档包含 descriptor，importer 就会在生成资产根节点附加 `ThreeUnityComponentApplicator`。它默认在 `Awake` 扫描当前实例层级（包括 inactive 子节点），为已登记 key 取得或添加组件并配置 JSON；`Apply()` 可手动重跑且不会重复添加同类型组件。它返回 `ThreeUnityComponentApplicationResult`，最近一次计数也可从 `LastResult` 读取。新组件的 `Awake` / `OnEnable` 会先于 `configure`，因此组件应在 `Configure` 本身、`Start` 或更晚阶段消费 descriptor 配置。未登记 descriptor 仍保留在 metadata 中并计为 `Unmapped`，解析或配置异常计为 `Failed`，其余 descriptor 继续处理。
+完整示例位于 [`unity-package/Samples~/Component Binding Door`](unity-package/Samples~/Component%20Binding%20Door)。未登记的 descriptor 仍保留在 metadata 中，但不会被执行。
 
-运行 `npm run example:components` 可重新生成 `examples/output/component-binding-door.threeunity`。也可以从 UPM 导入 `Component Binding Door` Sample，拖入生成资产并进入 Play：`Door Pivot` 会得到真实 `Door` 组件，并按 descriptor 的 95° / 0.45 秒参数自动打开。
+## 已验证证据
 
-## 转换规则
+下表只记录仓库已有的测试、构建和运行证据。自动化断言、实体 Player 记录、性能基准与人工观察互不替代。
 
-- Three.js 与 Unity 都是 Y-up，但手性不同。导入器会反转 Z、转换 Quaternion，并把每个三角形的索引绕序反转一次，使镜像后的几何继续朝外渲染。
-- `unitScaleMeters` 在 Unity 导入时应用于位置、相机裁剪面和灯光范围。
-- 支持普通 `BufferGeometry`，包括 position、normal、uv、vertex color、index、groups/submeshes。
-- 支持 `SkinnedMesh`、每顶点最多四个骨骼影响、骨骼层级与 inverse bind matrix；骨骼、skin 和动画目标均以 node id 关联，不依赖名称唯一。
-- 支持 position/normal morph target、Mesh 实例初始 morph weight，以及 `AnimationClip` 中节点/骨骼的 position、quaternion、scale 和 morph influence 动画；Unity 会生成真实 BlendShape 与可循环播放的 clip 子资产。
-- 支持 MeshBasicMaterial、MeshStandardMaterial 的基础颜色、金属度、粗糙度、透明、双面、发光与常用纹理。
-- 支持 Perspective/Orthographic Camera，以及 Directional/Point/Spot/Ambient Light。
-- Built-in Render Pipeline 和 URP 会自动选取各自可用的 Lit/Unlit Shader。
+| 快照 | 证据 |
+|---|---|
+| 2026-08-31 / `6e9659b` | `npm run build` PASS；Node 65/65；.NET Host 26/26；Unity EditMode 87/87；Morph 示例与 CLI validate PASS |
+| 2026-08-30 conversion snapshot | Voxel Frontier、LittleCubes、Warptracker 三个检入资产通过当时的 CLI validate、Unity 批处理导入和 `StandaloneWindows64` Player 构建 |
+| 2026-08-30 physical lifecycle | 两个 logic profile 的实体 Player 故障注入均到达新 session ready 与后续 logic tick；`shop-flight-v1` 记录最大 Host 并发 1，LittleCubes 记录 `OrphanHost=False` |
 
-## v0.1 边界
+当前记录中的固定工作负载结果：
 
-这是一个场景与资产桥，不是 JavaScript 到 C# 的通用编译器。当前不转换：
+| 场景 | 记录结果 |
+|---|---:|
+| name-to-shop 空闲 Unity→Web 消息 | `−89.1%` |
+| LittleCubes 240 FPS Web→Unity 输入消息 | `−94.2%` |
+| LittleCubes 体素碰撞采样 | `−90.8%` |
 
-- 任意 JavaScript 游戏逻辑、DOM/UI、WebXR 和自定义 GLSL Shader。
-- morph tangent、progressive multi-frame BlendShape、材质动画、Humanoid Avatar、动作重定向、IK、root motion、Animator Controller/动画混合树、粒子与后处理。
-- HDRP 专用 Shader 映射。
-- 外链纹理；纹理必须能在导出时读取并嵌入，跨域图片需配置 CORS。
+这些数字是相同工作负载下的记录值，不是对任意项目的普遍性能保证。测试方法、队列字段与扩展约束见 [`docs/BRIDGE_PERFORMANCE.md`](docs/BRIDGE_PERFORMANCE.md)。
 
-这些边界会作为导出 warnings 写入文件，并显示在 Unity Import Log。项目组件只能通过上述显式白名单绑定；这不会把任意 JavaScript 自动翻译成 C#。
+> [!WARNING]
+> 最新 Morph Target v3 已通过 Unity `BakeMesh` 变形与 bounds smoke，但没有新增 Game View 人工视觉观察；自动化证据不替代视觉/UI/输入验收。
 
-## 开源游戏实转
+## 明确边界
 
-仓库中的 `conversions/` 包含 Voxel Frontier、LittleCubes、Warptracker 三个场景资产实转，以及 name-to-shop / LittleCubes 的 Web Bridge + Unity 权威逻辑实测。前三份文件均通过 CLI 校验、Unity 6 批处理导入和 `StandaloneWindows64` Player 构建；name-to-shop 保留原版 UI/渲染，并把飞行模拟剥离到 `shop-flight-v1`；LittleCubes 则把玩家运动和体素碰撞交给 `voxel-player-v1`。详见 [`conversions/name-to-shop-logic/RESULTS.md`](conversions/name-to-shop-logic/RESULTS.md) 与 [`conversions/little-cubes-logic/RESULTS.md`](conversions/little-cubes-logic/RESULTS.md)。
+Three Unity Bridge 是场景、运行时与宿主桥，不是 JavaScript → C# 通用编译器。
 
-Unity 运行时包还提供两类可选控制器：`ThreeUnityFirstPersonController`（WASD、鼠标视角、跳跃，以及可选的方块挖掘/放置）和 `ThreeUnityOrbitShowcaseController`（平移、环绕、缩放）。它们不会把任意 JavaScript 自动翻译成 C#，但能为转换产物建立可操作的验收入口。详见 [`conversions/RESULTS.md`](conversions/RESULTS.md)。
+- 资产路径不会自动迁移 DOM/CSS、任意 JavaScript、音频、存档、WebXR 或自定义 GLSL。
+- Web Bridge 当前仅支持 Windows，并依赖 WebView2 Evergreen Runtime。
+- Morph tangent、progressive multi-frame BlendShape、材质/UV 动画仍未支持。
+- Humanoid Avatar、重定向、IK、root motion、Animator Controller 与 Blend Tree 不在当前范围。
+- HDRP 专用映射、粒子与后处理尚未覆盖。
+- 外链纹理必须在导出时可读取；跨域资源仍受 CORS 约束。
+- `InstancedMesh` 当前展开为多个 GameObject，超大场景尚未使用 GPU instancing 或二进制载荷。
+- 项目组件只能通过显式白名单绑定；descriptor 本身不会把任意 JavaScript 翻译成 C#。
 
-## 开发验证
+## 仓库结构
+
+| 路径 | 职责 |
+|---|---|
+| `src/` | TypeScript exporter、CLI、协议与 browser-side logic SDK |
+| `unity-package/` | UPM Runtime、Editor importer、Shaders、Samples 与 EditMode tests |
+| `webview-host/` | .NET 8 Windows WebView2 Host |
+| `webview-host-tests/` | Host 生命周期与恢复测试 |
+| `examples/` | 静态、骨骼动画、Morph、组件绑定与 logic adapter 示例 |
+| `tests/` | Node 合同、导出器与协议测试 |
+| `benchmarks/` | 输入与碰撞 transport 的可复现基准 |
+| `conversion-tools/` | 开源游戏 capture 与实体 Player 故障工具 |
+| `conversions/` | 已检入的转换资产与证据报告 |
+| `docs/` | 性能、协议与架构设计文档 |
+
+## 开发与验证
 
 ```powershell
 npm run build
 npm test
-npm run example:morph
-node .\dist\cli.js validate .\examples\output\morph-target-animation.threeunity
+dotnet test .\webview-host-tests\ThreeUnityWebHost.Tests.csproj -c Release
 ```
 
-默认 Node 套件只覆盖可复用 TypeScript 合同。修改 WebView Host 时再运行 `dotnet test .\webview-host-tests\ThreeUnityWebHost.Tests.csproj -c Release`；修改 UPM Runtime、Editor 或 importer 时运行 Unity EditMode 包测试。`Test-UnityLogicReconnect.ps1` 仅用于对应的 Web Bridge 生命周期故障模式，两个 transport benchmark 仅用于性能改动，不属于每次功能修改的默认回归。
+修改 UPM Runtime、Editor 或 importer 时，还需要把 `unity-package` 安装到一次性 Unity 项目并运行 EditMode tests；权威结果是已完成、测试数大于 0 且 failures 为 0 的 XML。修改 Web Bridge 生命周期时再运行对应实体 Player fault harness；只有性能改动才运行 benchmarks。
+
+## 进一步阅读
+
+- [Bridge 性能、背压与遥测](docs/BRIDGE_PERFORMANCE.md)
+- [开源游戏转换总览](conversions/RESULTS.md)
+- [name-to-shop Logic Bridge 结果](conversions/name-to-shop-logic/RESULTS.md)
+- [LittleCubes Logic Bridge 结果](conversions/little-cubes-logic/RESULTS.md)
+- [Browser-side Logic Adapter](examples/logic-adapters/name-to-shop/README.md)
+- [UPM Changelog](unity-package/CHANGELOG.md)
+
+## License
+
+MIT — see [LICENSE](LICENSE).
