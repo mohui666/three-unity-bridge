@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added `.threeunity` format v6 native `InstancedMesh` records with compact local matrices, optional per-instance colors, and an explicit legacy `expanded` export mode.
+- Added `ThreeUnityInstancedRenderer`, 1023-instance `Graphics.DrawMeshInstanced` batching, submesh-aware shared materials, and import-time colored material variants without per-instance GameObjects or runtime material clones.
+- Added a deterministic 2500-instance GPU Instanced Mesh sample with varied transforms, shear, two material groups, per-instance color, and looping group animation.
 - Added `.threeunity` format v5 native `Line`, `LineSegments`, `LineLoop`, `Points`, and `Sprite` records with renderer-slot-aware primitive materials.
 - The importer now creates `MeshTopology.Lines`, camera-facing point quads, and center-aware sprite quads with packaged unlit billboard shaders.
 - Added a deterministic Line Points Sprite sample with indexed material groups, vertex colors, an asymmetric embedded texture, and looping transform/material animation.

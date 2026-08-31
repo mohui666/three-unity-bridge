@@ -5,6 +5,7 @@ import {
   Bone,
   BoxGeometry,
   BufferGeometry,
+  Color,
   ColorKeyframeTrack,
   DataTexture,
   DirectionalLight,
@@ -247,7 +248,7 @@ test("exports Line, LineSegments, LineLoop, Points, and Sprite as format v5 prim
 
   const document = await exportThreeUnity(scene, { animationSampleRate: 2 });
   assert.deepEqual(validateDocument(document), { valid: true, errors: [] });
-  assert.equal(document.version, 5);
+  assert.equal(document.version, 6);
   assert.equal(document.primitives.length, 5);
 
   const primitiveFor = (object: Line | LineSegments | LineLoop | Points | Sprite) => {
@@ -355,7 +356,7 @@ test("exports reusable playable runtime configuration", async () => {
   assert.equal(document.runtime.hotbar[0].name, "Grass");
 });
 
-test("accepts format versions 1 through 4 without v5 primitive fields", async () => {
+test("accepts format versions 1 through 5 without later format fields", async () => {
   const scene = new Scene();
   const texture = new DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1, RGBAFormat, UnsignedByteType);
   const mesh = new Mesh(new BoxGeometry(), new MeshStandardMaterial({ map: texture }));
@@ -364,7 +365,13 @@ test("accepts format versions 1 through 4 without v5 primitive fields", async ()
     new VectorKeyframeTrack(`${mesh.uuid}.position`, [0, 1], [0, 0, 0, 1, 0, 0]),
   ]));
   const currentDocument = await exportThreeUnity(scene);
-  const version4Document = structuredClone(currentDocument) as unknown as Record<string, unknown>;
+  const version5Document = structuredClone(currentDocument) as unknown as Record<string, unknown>;
+  version5Document.version = 5;
+  delete version5Document.instancedMeshes;
+  for (const node of version5Document.nodes as Array<Record<string, unknown>>) delete node.instancedMeshId;
+  assert.deepEqual(validateDocument(version5Document), { valid: true, errors: [] });
+
+  const version4Document = structuredClone(version5Document) as unknown as Record<string, unknown>;
   version4Document.version = 4;
   delete version4Document.primitives;
   for (const node of version4Document.nodes as Array<Record<string, unknown>>) delete node.primitiveId;
@@ -461,7 +468,7 @@ test("exports a two-bone SkinnedMesh and baked AnimationClip with stable node re
   });
 
   assert.deepEqual(validateDocument(document), { valid: true, errors: [] });
-  assert.equal(document.version, 5);
+  assert.equal(document.version, 6);
   assert.equal(document.skins.length, 1);
   assert.equal(document.animations.length, 1);
   assert.equal(document.autoplayAnimation, true);
@@ -591,7 +598,7 @@ test("exports absolute and relative morph targets, initial weights, and baked mo
   const document = await exportThreeUnity(scene, { animationSampleRate: 4 });
 
   assert.deepEqual(validateDocument(document), { valid: true, errors: [] });
-  assert.equal(document.version, 5);
+  assert.equal(document.version, 6);
   assert.strictEqual(absoluteMesh.morphTargetInfluences, originalInfluenceReference);
   assert.deepEqual(absoluteMesh.morphTargetInfluences, originalInfluences);
   assert.deepEqual(absoluteMesh.position.toArray(), originalPosition);
@@ -734,7 +741,7 @@ test("exports v4 static UV state and shared material animation without mutating 
   const document = await exportThreeUnity(scene, { animationSampleRate: 2 });
 
   assert.deepEqual(validateDocument(document), { valid: true, errors: [] });
-  assert.equal(document.version, 5);
+  assert.equal(document.version, 6);
   assert.equal(document.textures[0].wrapS, "repeat");
   assert.equal(document.textures[0].wrapT, "mirror");
   const exportedSharedMaterial = document.materials.find((material) => material.name === sharedMaterial.name);
@@ -803,15 +810,132 @@ test("exports render cameras that live outside the scene tree", async () => {
   assert.equal(cameraNode.camera.fov, 72);
 });
 
-test("expands InstancedMesh transforms without duplicating geometry", async () => {
+test("exports native GPU InstancedMesh records with full matrices and colors while retaining expanded mode", async () => {
   const scene = new Scene();
-  const instances = new InstancedMesh(new BoxGeometry(), new MeshStandardMaterial(), 3);
-  instances.name = "Voxel";
-  for (let index = 0; index < 3; index += 1) instances.setMatrixAt(index, new Matrix4().makeTranslation(index, index * 2, -index));
+  const geometry = new BoxGeometry();
+  geometry.clearGroups();
+  geometry.addGroup(0, 18, 0);
+  geometry.addGroup(18, 18, 1);
+  const primaryMaterial = new MeshStandardMaterial({ color: 0x80c0ff });
+  const accentMaterial = new MeshStandardMaterial({ color: 0xff8050 });
+  const instanceCount = 2050;
+  const instances = new InstancedMesh(geometry, [primaryMaterial, accentMaterial], instanceCount);
+  instances.name = "GPU Test Instances";
+  instances.position.set(3, 4, 5);
+  const matrix = new Matrix4();
+  const color = new Color();
+  for (let index = 0; index < instanceCount; index += 1) {
+    if (index === instanceCount - 1) {
+      matrix.set(
+        1, 0.25, 0, 11,
+        0, 1, -0.125, 12,
+        0, 0, 1, 13,
+        0, 0, 0, 1,
+      );
+    } else {
+      matrix.makeTranslation(index % 41, Math.floor(index / 41), -index * 0.01);
+    }
+    instances.setMatrixAt(index, matrix);
+    color.setRGB(index / (instanceCount - 1), (index % 17) / 16, (index % 29) / 28);
+    instances.setColorAt(index, color);
+  }
+  instances.instanceMatrix.needsUpdate = true;
+  instances.instanceColor!.needsUpdate = true;
   scene.add(instances);
-  const document = await exportThreeUnity(scene);
+
+  const clip = new AnimationClip("Instanced Sweep", 1, [
+    new VectorKeyframeTrack(`${instances.uuid}.position`, [0, 1], [3, 4, 5, 4, 4, 5]),
+    new ColorKeyframeTrack(`${instances.uuid}.material[1].color`, [0, 1], [1, 0.5, 0.25, 0.25, 0.5, 1]),
+  ]);
+  scene.animations.push(clip);
+  const source = {
+    matrices: Array.from(instances.instanceMatrix.array),
+    colors: Array.from(instances.instanceColor!.array),
+    matrixVersion: instances.instanceMatrix.version,
+    colorVersion: instances.instanceColor!.version,
+    position: instances.position.toArray(),
+    quaternion: instances.quaternion.toArray(),
+    scale: instances.scale.toArray(),
+    accentColor: accentMaterial.color.toArray(),
+  };
+
+  const document = await exportThreeUnity(scene, { animationSampleRate: 2 });
+  assert.deepEqual(validateDocument(document), { valid: true, errors: [] });
+  assert.equal(document.version, 6);
   assert.equal(document.meshes.length, 1);
-  assert.equal(document.nodes.length, 5);
-  assert.equal(document.nodes[1].meshId, "");
-  assert.deepEqual(document.nodes.slice(2).map((node) => node.position.map((value) => value || 0)), [[0, 0, 0], [1, 2, -1], [2, 4, -2]]);
+  assert.equal(document.instancedMeshes.length, 1);
+  assert.equal(document.nodes.length, 2);
+
+  const node = document.nodes.find((candidate) => candidate.name === instances.name);
+  assert.ok(node);
+  const record = document.instancedMeshes[0];
+  assert.equal(node.instancedMeshId, record.id);
+  assert.equal(node.meshId, "");
+  assert.equal(node.primitiveId, "");
+  assert.equal(record.name, "GPU Test Instances Instances");
+  assert.equal(record.count, instanceCount);
+  assert.equal(record.matrices.length, instanceCount * 16);
+  assert.equal(record.colors.length, instanceCount * 4);
+  for (const index of [0, 1024, instanceCount - 1]) {
+    assert.deepEqual(record.matrices.slice(index * 16, index * 16 + 16), source.matrices.slice(index * 16, index * 16 + 16));
+    assert.deepEqual(record.colors.slice(index * 4, index * 4 + 4), [...source.colors.slice(index * 3, index * 3 + 3), 1]);
+  }
+  assert.equal(record.matrices[(instanceCount - 1) * 16 + 4], 0.25);
+  assert.equal(record.matrices[(instanceCount - 1) * 16 + 9], -0.125);
+  assert.equal(record.meshId, document.meshes[0].id);
+  assert.deepEqual(document.meshes[0].groups, [
+    { start: 0, count: 18, materialIndex: 0 },
+    { start: 18, count: 18, materialIndex: 1 },
+  ]);
+  assert.deepEqual(document.meshes[0].materialIds, document.materials.map((material) => material.id));
+  assert.ok(document.animations[0].tracks.some((track) => track.targetNodeId === node.id && track.property === "position"));
+  assert.ok(!document.animations[0].tracks.some((track) => track.property === "materialBaseColor"));
+  assert.match(
+    document.warnings.join("\n"),
+    /Animation 'Instanced Sweep'.*node 'GPU Test Instances'.*material index 1.*property 'material\.color'/,
+  );
+
+  assert.deepEqual(Array.from(instances.instanceMatrix.array), source.matrices);
+  assert.deepEqual(Array.from(instances.instanceColor!.array), source.colors);
+  assert.equal(instances.instanceMatrix.version, source.matrixVersion);
+  assert.equal(instances.instanceColor!.version, source.colorVersion);
+  assert.deepEqual(instances.position.toArray(), source.position);
+  assert.deepEqual(instances.quaternion.toArray(), source.quaternion);
+  assert.deepEqual(instances.scale.toArray(), source.scale);
+  assert.deepEqual(accentMaterial.color.toArray(), source.accentColor);
+
+  const nonAffineDocument = structuredClone(document);
+  nonAffineDocument.instancedMeshes[0].matrices[3] = 0.5;
+  assert.match(validateDocument(nonAffineDocument).errors.join("\n"), /must be an affine matrix/);
+  const conflictingNodeDocument = structuredClone(document);
+  const conflictingNode = conflictingNodeDocument.nodes.find((candidate) => candidate.instancedMeshId);
+  assert.ok(conflictingNode);
+  conflictingNode.meshId = record.meshId;
+  assert.match(validateDocument(conflictingNodeDocument).errors.join("\n"), /only one of meshId, primitiveId, or instancedMeshId/);
+
+  const expanded = await exportThreeUnity(scene, { instancedMeshMode: "expanded", animationSampleRate: 2 });
+  assert.deepEqual(validateDocument(expanded), { valid: true, errors: [] });
+  assert.equal(expanded.instancedMeshes.length, 0);
+  assert.equal(expanded.nodes.length, instanceCount + 2);
+  const expandedParent = expanded.nodes.find((candidate) => candidate.name === instances.name);
+  assert.ok(expandedParent);
+  assert.equal(expandedParent.instancedMeshId, "");
+  const expandedChildren = expanded.nodes.filter((candidate) => candidate.parentId === expandedParent.id && candidate.meshId);
+  assert.equal(expandedChildren.length, instanceCount);
+  const expandedMaterialTracks = expanded.animations[0].tracks.filter((track) => track.property === "materialBaseColor");
+  assert.equal(expandedMaterialTracks.length, instanceCount);
+  const expandedChildIds = new Set(expandedChildren.map((child) => child.id));
+  assert.ok(expandedMaterialTracks.every((track) => expandedChildIds.has(track.targetNodeId)));
+  assert.match(expanded.warnings.join("\n"), /per-instance colors are not exported when instancedMeshMode is 'expanded'/);
+  assert.deepEqual(accentMaterial.color.toArray(), source.accentColor);
+
+  const emptyScene = new Scene();
+  const emptyInstances = new InstancedMesh(new BoxGeometry(), new MeshStandardMaterial(), 1);
+  emptyInstances.count = 0;
+  emptyScene.add(emptyInstances);
+  const emptyDocument = await exportThreeUnity(emptyScene);
+  assert.deepEqual(validateDocument(emptyDocument), { valid: true, errors: [] });
+  assert.equal(emptyDocument.instancedMeshes[0].count, 0);
+  assert.deepEqual(emptyDocument.instancedMeshes[0].matrices, []);
+  assert.deepEqual(emptyDocument.instancedMeshes[0].colors, []);
 });

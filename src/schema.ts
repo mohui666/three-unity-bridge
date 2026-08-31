@@ -3,7 +3,8 @@ export const THREE_UNITY_LEGACY_VERSION = 1 as const;
 export const THREE_UNITY_SKINNED_VERSION = 2 as const;
 export const THREE_UNITY_MORPH_VERSION = 3 as const;
 export const THREE_UNITY_MATERIAL_ANIMATION_VERSION = 4 as const;
-export const THREE_UNITY_VERSION = 5 as const;
+export const THREE_UNITY_PRIMITIVE_VERSION = 5 as const;
+export const THREE_UNITY_VERSION = 6 as const;
 
 export type Vec2 = [number, number];
 export type Vec3 = [number, number, number];
@@ -18,6 +19,7 @@ export interface ThreeUnityDocument {
   unitScaleMeters: number;
   nodes: ThreeUnityNode[];
   meshes: ThreeUnityMesh[];
+  instancedMeshes: ThreeUnityInstancedMesh[];
   primitives: ThreeUnityPrimitive[];
   skins: ThreeUnitySkin[];
   animations: ThreeUnityAnimation[];
@@ -60,6 +62,7 @@ export interface ThreeUnityNode {
   layersMask: number;
   meshId: string;
   primitiveId: string;
+  instancedMeshId: string;
   skinId: string;
   morphWeights: number[];
   camera?: ThreeUnityCamera;
@@ -108,6 +111,17 @@ export interface ThreeUnityMesh {
   skinIndices: number[];
   skinWeights: number[];
   morphTargets: ThreeUnityMorphTarget[];
+}
+
+export interface ThreeUnityInstancedMesh {
+  id: string;
+  name: string;
+  meshId: string;
+  count: number;
+  /** count local matrices in Three.js Matrix4.elements column-major order. */
+  matrices: number[];
+  /** Empty, or one RGBA color per instance. */
+  colors: number[];
 }
 
 export type ThreeUnityPrimitiveType = "line" | "line-segments" | "line-loop" | "points" | "sprite";
@@ -239,15 +253,24 @@ export function validateDocument(value: unknown): ValidationResult {
     && version !== THREE_UNITY_SKINNED_VERSION
     && version !== THREE_UNITY_MORPH_VERSION
     && version !== THREE_UNITY_MATERIAL_ANIMATION_VERSION
+    && version !== THREE_UNITY_PRIMITIVE_VERSION
     && version !== THREE_UNITY_VERSION
   ) {
     errors.push(
-      `version must be ${THREE_UNITY_LEGACY_VERSION}, ${THREE_UNITY_SKINNED_VERSION}, ${THREE_UNITY_MORPH_VERSION}, ${THREE_UNITY_MATERIAL_ANIMATION_VERSION}, or ${THREE_UNITY_VERSION}.`,
+      `version must be ${THREE_UNITY_LEGACY_VERSION}, ${THREE_UNITY_SKINNED_VERSION}, ${THREE_UNITY_MORPH_VERSION}, ${THREE_UNITY_MATERIAL_ANIMATION_VERSION}, ${THREE_UNITY_PRIMITIVE_VERSION}, or ${THREE_UNITY_VERSION}.`,
     );
   }
   if (!Array.isArray(document.nodes)) errors.push("nodes must be an array.");
   if (!Array.isArray(document.meshes)) errors.push("meshes must be an array.");
-  if (version === THREE_UNITY_VERSION && !Array.isArray(document.primitives)) errors.push("primitives must be an array in version 5.");
+  if (
+    (version === THREE_UNITY_PRIMITIVE_VERSION || version === THREE_UNITY_VERSION)
+    && !Array.isArray(document.primitives)
+  ) {
+    errors.push("primitives must be an array in version 5 or later.");
+  }
+  if (version === THREE_UNITY_VERSION && !Array.isArray(document.instancedMeshes)) {
+    errors.push("instancedMeshes must be an array in version 6.");
+  }
   if (!Array.isArray(document.materials)) errors.push("materials must be an array.");
   if (!Array.isArray(document.textures)) errors.push("textures must be an array.");
   // Early format-v1 exporters predate runtime profiles. Unity already imports
@@ -261,12 +284,17 @@ export function validateDocument(value: unknown): ValidationResult {
   const v2OrLater = version === THREE_UNITY_SKINNED_VERSION
     || version === THREE_UNITY_MORPH_VERSION
     || version === THREE_UNITY_MATERIAL_ANIMATION_VERSION
+    || version === THREE_UNITY_PRIMITIVE_VERSION
     || version === THREE_UNITY_VERSION;
   const v3OrLater = version === THREE_UNITY_MORPH_VERSION
     || version === THREE_UNITY_MATERIAL_ANIMATION_VERSION
+    || version === THREE_UNITY_PRIMITIVE_VERSION
     || version === THREE_UNITY_VERSION;
-  const v4OrLater = version === THREE_UNITY_MATERIAL_ANIMATION_VERSION || version === THREE_UNITY_VERSION;
-  const v5 = version === THREE_UNITY_VERSION;
+  const v4OrLater = version === THREE_UNITY_MATERIAL_ANIMATION_VERSION
+    || version === THREE_UNITY_PRIMITIVE_VERSION
+    || version === THREE_UNITY_VERSION;
+  const v5OrLater = version === THREE_UNITY_PRIMITIVE_VERSION || version === THREE_UNITY_VERSION;
+  const v6 = version === THREE_UNITY_VERSION;
   const documentV2 = document as Partial<ThreeUnityDocument>;
   if (v2OrLater) {
     if (!Array.isArray(documentV2.skins)) errors.push("skins must be an array in version 2 or later.");
@@ -288,8 +316,21 @@ export function validateDocument(value: unknown): ValidationResult {
       if (!Array.isArray(node.scale) || node.scale.length !== 3) errors.push(`nodes[${index}].scale must have 3 values.`);
       if (v2OrLater && typeof node.skinId !== "string") errors.push(`nodes[${index}].skinId must be a string in version 2 or later.`);
       if (v3OrLater && !isFiniteNumberArray(node.morphWeights)) errors.push(`nodes[${index}].morphWeights must contain finite values in version 3 or later.`);
-      if (v5 && typeof node.primitiveId !== "string") errors.push(`nodes[${index}].primitiveId must be a string in version 5.`);
-      if (v5 && node.meshId && node.primitiveId) errors.push(`nodes[${index}] cannot reference both meshId and primitiveId.`);
+      if (v5OrLater && typeof node.primitiveId !== "string") errors.push(`nodes[${index}].primitiveId must be a string in version 5 or later.`);
+      if (v6 && typeof node.instancedMeshId !== "string") errors.push(`nodes[${index}].instancedMeshId must be a string in version 6.`);
+      if (version === THREE_UNITY_PRIMITIVE_VERSION && node.meshId && node.primitiveId) {
+        errors.push(`nodes[${index}] cannot reference both meshId and primitiveId.`);
+      }
+      if (v6) {
+        const renderableReferenceCount = [node.meshId, node.primitiveId, node.instancedMeshId].filter(Boolean).length;
+        if (renderableReferenceCount > 1) {
+          errors.push(`nodes[${index}] may reference only one of meshId, primitiveId, or instancedMeshId.`);
+        }
+        if (node.instancedMeshId && node.skinId) errors.push(`nodes[${index}] with instancedMeshId cannot reference a skin.`);
+        if (node.instancedMeshId && Array.isArray(node.morphWeights) && node.morphWeights.length > 0) {
+          errors.push(`nodes[${index}] with instancedMeshId must have empty morphWeights.`);
+        }
+      }
     }
     for (const node of document.nodes) {
       if (node.parentId && !nodeIds.has(node.parentId)) errors.push(`Node '${node.id}' references missing parent '${node.parentId}'.`);
@@ -329,7 +370,7 @@ export function validateDocument(value: unknown): ValidationResult {
       if (!isFiniteNumberArray(material.baseColorTextureST) || material.baseColorTextureST.length !== 4) {
         errors.push(`${path}.baseColorTextureST must contain 4 finite values.`);
       }
-      if (v5) {
+      if (v5OrLater) {
         if (!isMaterialRenderMode(material.renderMode)) errors.push(`${path}.renderMode must be surface, line, points, or sprite.`);
         if (material.renderMode === "points" && (!Number.isFinite(material.pointSize) || material.pointSize <= 0)) {
           errors.push(`${path}.pointSize must be a positive finite number for points materials.`);
@@ -341,7 +382,7 @@ export function validateDocument(value: unknown): ValidationResult {
   }
 
   const primitivesById = new Map<string, ThreeUnityPrimitive>();
-  if (v5 && Array.isArray(document.primitives)) {
+  if (v5OrLater && Array.isArray(document.primitives)) {
     for (const [index, primitive] of document.primitives.entries()) {
       const path = `primitives[${index}]`;
       if (!primitive.id) errors.push(`${path}.id is required.`);
@@ -351,10 +392,24 @@ export function validateDocument(value: unknown): ValidationResult {
     }
   }
 
+  const instancedMeshesById = new Map<string, ThreeUnityInstancedMesh>();
+  if (v6 && Array.isArray(document.instancedMeshes)) {
+    for (const [index, instancedMesh] of document.instancedMeshes.entries()) {
+      const path = `instancedMeshes[${index}]`;
+      if (!instancedMesh.id) errors.push(`${path}.id is required.`);
+      if (instancedMeshesById.has(instancedMesh.id)) errors.push(`Duplicate instanced mesh id '${instancedMesh.id}'.`);
+      instancedMeshesById.set(instancedMesh.id, instancedMesh);
+      validateInstancedMesh(instancedMesh, path, meshesById, materialsById, errors);
+    }
+  }
+
   for (const node of nodesById.values()) {
     if (node.meshId && !meshesById.has(node.meshId)) errors.push(`Node '${node.id}' references missing mesh '${node.meshId}'.`);
-    if (v5 && node.primitiveId && !primitivesById.has(node.primitiveId)) {
+    if (v5OrLater && node.primitiveId && !primitivesById.has(node.primitiveId)) {
       errors.push(`Node '${node.id}' references missing primitive '${node.primitiveId}'.`);
+    }
+    if (v6 && node.instancedMeshId && !instancedMeshesById.has(node.instancedMeshId)) {
+      errors.push(`Node '${node.id}' references missing instanced mesh '${node.instancedMeshId}'.`);
     }
     if (v3OrLater && Array.isArray(node.morphWeights)) {
       const expectedCount = node.meshId ? meshesById.get(node.meshId)?.morphTargets?.length ?? 0 : 0;
@@ -438,6 +493,84 @@ export function validateDocument(value: unknown): ValidationResult {
   }
 
   return { valid: errors.length === 0, errors };
+}
+
+const AFFINE_MATRIX_TOLERANCE = 1e-6;
+
+function validateInstancedMesh(
+  instancedMesh: ThreeUnityInstancedMesh,
+  path: string,
+  meshesById: Map<string, ThreeUnityMesh>,
+  materialsById: Map<string, ThreeUnityMaterial>,
+  errors: string[],
+): void {
+  const validCount = Number.isInteger(instancedMesh.count) && instancedMesh.count >= 0;
+  if (!validCount) errors.push(`${path}.count must be a non-negative integer.`);
+  const expectedMatrixCount = validCount ? instancedMesh.count * 16 : -1;
+  if (!isFiniteNumberArray(instancedMesh.matrices) || instancedMesh.matrices.length !== expectedMatrixCount) {
+    errors.push(`${path}.matrices must contain 16 finite values per instance.`);
+  } else {
+    for (let index = 0; index < instancedMesh.count; index += 1) {
+      const offset = index * 16;
+      if (
+        Math.abs(instancedMesh.matrices[offset + 3]) > AFFINE_MATRIX_TOLERANCE
+        || Math.abs(instancedMesh.matrices[offset + 7]) > AFFINE_MATRIX_TOLERANCE
+        || Math.abs(instancedMesh.matrices[offset + 11]) > AFFINE_MATRIX_TOLERANCE
+        || Math.abs(instancedMesh.matrices[offset + 15] - 1) > AFFINE_MATRIX_TOLERANCE
+      ) {
+        errors.push(`${path}.matrices instance ${index} must be an affine matrix.`);
+      }
+    }
+  }
+  const expectedColorCount = validCount ? instancedMesh.count * 4 : -1;
+  if (
+    !isFiniteNumberArray(instancedMesh.colors)
+    || instancedMesh.colors.length !== 0 && instancedMesh.colors.length !== expectedColorCount
+  ) {
+    errors.push(`${path}.colors must be empty or contain 4 finite values per instance.`);
+  }
+
+  const mesh = meshesById.get(instancedMesh.meshId);
+  if (!mesh) {
+    errors.push(`${path} references missing mesh '${instancedMesh.meshId}'.`);
+    return;
+  }
+  if (!Array.isArray(mesh.skinIndices) || mesh.skinIndices.length !== 0 || !Array.isArray(mesh.skinWeights) || mesh.skinWeights.length !== 0) {
+    errors.push(`${path} mesh '${mesh.id}' cannot contain skin indices or weights.`);
+  }
+  if (!Array.isArray(mesh.morphTargets) || mesh.morphTargets.length !== 0) {
+    errors.push(`${path} mesh '${mesh.id}' cannot contain morph targets.`);
+  }
+  if (!Array.isArray(mesh.materialIds) || mesh.materialIds.length === 0) {
+    errors.push(`${path} mesh '${mesh.id}' must contain at least one materialId.`);
+  } else {
+    for (const materialId of mesh.materialIds) {
+      if (!materialsById.has(materialId)) errors.push(`${path} mesh '${mesh.id}' references missing material '${materialId}'.`);
+    }
+  }
+  if (!Array.isArray(mesh.groups)) {
+    errors.push(`${path} mesh '${mesh.id}' groups must be an array.`);
+    return;
+  }
+  const materialCount = Array.isArray(mesh.materialIds) ? mesh.materialIds.length : 0;
+  const elementCount = Array.isArray(mesh.indices) && mesh.indices.length > 0
+    ? mesh.indices.length
+    : Array.isArray(mesh.positions) ? mesh.positions.length / 3 : 0;
+  for (const [groupIndex, group] of mesh.groups.entries()) {
+    const groupPath = `${path} mesh '${mesh.id}' group ${groupIndex}`;
+    if (!Number.isInteger(group.materialIndex) || group.materialIndex < 0 || group.materialIndex >= materialCount) {
+      errors.push(`${groupPath} materialIndex must reference mesh materialIds.`);
+    }
+    if (
+      !Number.isInteger(group.start)
+      || group.start < 0
+      || !Number.isInteger(group.count)
+      || group.count < 0
+      || group.start + group.count > elementCount
+    ) {
+      errors.push(`${groupPath} start/count must be non-negative integers within mesh elements.`);
+    }
+  }
 }
 
 function validatePrimitive(

@@ -9,12 +9,12 @@
 </p>
 
 <p align="center">
-  将受支持的 Three.js 场景、动画、Morph Target、材质动画与非网格 Primitive 转换为 Unity 原生资产，<br>
+  将受支持的 Three.js 场景、动画、Morph Target、GPU InstancedMesh、材质动画与非网格 Primitive 转换为 Unity 原生资产，<br>
   或把原始 Web 游戏原样封装进 Windows Player，再按需把确定性逻辑交给 Unity。
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/.threeunity-v5-7C3AED?style=flat-square" alt=".threeunity format v5">
+  <img src="https://img.shields.io/badge/.threeunity-v6-7C3AED?style=flat-square" alt=".threeunity format v6">
   <img src="https://img.shields.io/badge/UPM-0.1.0-2563EB?style=flat-square&logo=unity" alt="UPM 0.1.0">
   <img src="https://img.shields.io/badge/Unity-2021.3%2B-111827?style=flat-square&logo=unity" alt="Unity 2021.3 or newer">
   <img src="https://img.shields.io/badge/Node.js-20%2B-15803D?style=flat-square&logo=nodedotjs" alt="Node.js 20 or newer">
@@ -46,7 +46,7 @@
 
 ### 路径 A：Unity 原生资产
 
-导出器读取 Three.js Scene/Object3D，把受支持的层级、Mesh、Line、Points、Sprite、材质、纹理、Camera、Light、Skin、动画与 Morph Target 写入版本化 `.threeunity`。Unity `ScriptedImporter` 再生成可拖入 Scene 的 Prefab 型主资产，以及 Mesh、Material、Texture、AnimationClip 等子资产；材质动画由同一个播放器按 Animation 时间通过 `MaterialPropertyBlock` 应用。
+导出器读取 Three.js Scene/Object3D，把受支持的层级、Mesh、InstancedMesh、Line、Points、Sprite、材质、纹理、Camera、Light、Skin、动画与 Morph Target 写入版本化 `.threeunity`。Unity `ScriptedImporter` 再生成可拖入 Scene 的 Prefab 型主资产，以及 Mesh、Material、Texture、AnimationClip 等子资产；材质动画由同一个播放器按 Animation 时间通过 `MaterialPropertyBlock` 应用。
 
 ### 路径 B：完整 Web 体验
 
@@ -58,9 +58,9 @@ Web Bridge 把源 `dist` 的内容和相对路径原样放入 `StreamingAssets`�
 flowchart LR
   subgraph Asset["路径 A · 原生资产转换"]
     Scene["Three.js Scene"] --> Exporter["TypeScript Exporter / CLI"]
-    Exporter --> Document[".threeunity v5"]
+    Exporter --> Document[".threeunity v6"]
     Document --> Importer["Unity ScriptedImporter"]
-    Importer --> Assets["Prefab · Mesh · Material<br/>Line · Points · Sprite<br/>AnimationClip · BlendShape"]
+    Importer --> Assets["Prefab · Mesh · Material<br/>GPU Instances · Line · Points · Sprite<br/>AnimationClip · BlendShape"]
     Assets --> NativePlayer["Unity Player"]
   end
 
@@ -91,6 +91,7 @@ flowchart LR
 | 能力 | 资产转换 | Web Bridge |
 |---|:---:|:---:|
 | Mesh、Submesh、Normal、UV、Vertex Color | ✅ Unity 原生资产 | ✅ 原版 Web 渲染 |
+| InstancedMesh / instanceMatrix / instanceColor | ✅ Format v6，原生 GPU instancing | ✅ 原版 Web 渲染 |
 | Line / LineSegments / LineLoop | ✅ Format v5，`MeshTopology.Lines` | ✅ 原版 Web 渲染 |
 | Points / Sprite | ✅ Format v5，camera-facing quad | ✅ 原版 Web 渲染 |
 | 基础材质、可嵌入纹理与 base-map wrap/ST | ✅ Format v4+ | ✅ 原样保留 |
@@ -116,6 +117,20 @@ flowchart LR
 - Unity Editor；UPM 声明兼容 Unity 2021.3+
 - Web Bridge 额外需要 .NET 8 SDK 与 WebView2 Evergreen Runtime
 - 当前仓库验证环境：Unity `6000.3.22f1`
+
+### InstancedMesh → Unity GPU Instancing 可见闭环
+
+```powershell
+npm install
+npm run example:instances
+node .\dist\cli.js validate .\examples\output\instanced-mesh-gpu.threeunity
+```
+
+这会生成一个完全程序化的 v6 资产：一个 `InstancedMesh` 节点携带 2500 个完整局部 Matrix4 和 RGBA 实例颜色，包含确定性位置、旋转、非均匀缩放、shear、两个 material groups，以及整个实例组的循环 Transform 动画。Unity 不为每个实例创建 GameObject；同一个 `ThreeUnityInstancedRenderer` 以 `1023 + 1023 + 454` 三个 matrix batches 绘制每个 submesh。
+
+也可以在 Unity Package Manager 中导入 **GPU Instanced Mesh** Sample，把 `instanced-mesh-gpu.threeunity` 拖入 Scene 后进入 Play Mode。实例颜色与基础贴图、材质色和可选 mesh vertex color 相乘。需要每实例 Collider、MonoBehaviour、metadata、picking 或单独编辑时，导出选项应显式使用 `instancedMeshMode: "expanded"`；导出器不会自动降级。
+
+当前专用 `ThreeUnity/Instanced Surface` shader 沿用包内 Built-in ForwardBase 材质路径，并在 Unity `6000.3.22f1` 的 Built-in Render Pipeline 项目中完成导入与 EditMode 验证；本轮未验证 URP，也不声明 HDRP 支持。
 
 ### Line / Points / Sprite 可见闭环
 
@@ -216,7 +231,8 @@ node .\dist\cli.js build-web-unity `
 | v2 | SkinnedMesh、四权重、Bind Pose、Transform Animation | importer 继续接受 |
 | v3 | Morph Target delta、初始 morph weights、morphWeight Animation | importer 继续接受 |
 | v4 | 纹理 wrap/ST、材质属性与基础纹理 UV 动画 | importer 继续接受 |
-| v5 | Line、LineSegments、LineLoop、Points、Sprite 与 primitive 材质 | 当前 exporter 输出 |
+| v5 | Line、LineSegments、LineLoop、Points、Sprite 与 primitive 材质 | importer 继续接受 |
+| v6 | InstancedMesh 完整局部 Matrix4、可选实例颜色与 GPU/expanded 模式 | 当前 exporter 输出 |
 
 > [!NOTE]
 > npm 与 UPM 元数据当前仍为 `0.1.0`；格式版本、ScriptedImporter revision 与软件版本是三套独立概念。
@@ -224,6 +240,8 @@ node .\dist\cli.js build-web-unity `
 关键规则：
 
 - Three.js 与 Unity 都是 Y-up，但手性不同；importer 镜像 Z，并把每个三角形绕序反转一次。
+- v6 原生实例记录保留 Three.js column-major `instanceMatrix`；importer 以 `mirror * source * mirror` 转换手性，只缩放 translation，运行时再乘节点 `localToWorldMatrix`，因此 shear 不会经过 TRS 分解而丢失。
+- 原生实例绘制按源顺序分成最多 1023 个矩阵的批次。Unity 按整批进行 culling 和 sorting，不会在批内逐实例做 frustum/occlusion culling，也不保证透明实例逐个从后到前排序。
 - Line 在导出时规范化为明确的 segment pairs，Unity 以 `MeshTopology.Lines` 导入；`LineSegments` 不会跨 pair 串联，`LineLoop` 会为每个 group 独立闭合。
 - Points 由单一 Renderer 的 camera-facing quads 表示，并保留 point size、size attenuation、纹理、逐点颜色与 material groups；Sprite quad 在 shader 中面向当前 Camera，并保留 center、scale、rotation 与 attenuation。
 - Points 与 Sprite 的 importer bounds 使用由点尺寸或 sprite corner 推导的有限保守范围；极端 FOV 或超大 screen-space primitive 仍需在目标 Camera 下人工确认裁剪表现。
@@ -244,9 +262,10 @@ node .\dist\cli.js build-web-unity `
 | `npm run example:morph` | `morph-target-animation.threeunity` | Morph Target Animation | `Bulge` / `Twist` BlendShape 与 morph-weight 动画 |
 | `npm run example:material` | `material-uv-animation.threeunity` | Material UV Animation | 共享材质、颜色/发光/透明/粗糙度与 base-map offset/repeat 动画 |
 | `npm run example:primitives` | `non-mesh-primitives.threeunity` | Line Points Sprite | 连续/独立/闭合线、分组彩色点云、billboard Sprite 与 Transform/材质动画 |
+| `npm run example:instances` | `instanced-mesh-gpu.threeunity` | GPU Instanced Mesh | 2500 个彩色完整矩阵、两个 submesh/material slots、三批 GPU instanced draw 与整体 Transform 动画 |
 | `npm run example:components` | `component-binding-door.threeunity` | Component Binding Door | descriptor 显式绑定项目自有 `Door` MonoBehaviour |
 
-六个 Sample 都随 UPM 包提供，可从 Package Manager 的 Samples 页面直接导入。动画 Sample 拖入 Scene 后进入 Play 即可运行，不需要额外 Animator Controller。
+七个 Sample 都随 UPM 包提供，可从 Package Manager 的 Samples 页面直接导入。动画 Sample 拖入 Scene 后进入 Play 即可运行，不需要额外 Animator Controller。
 
 ## Web Bridge 运行时
 
@@ -297,6 +316,7 @@ ThreeUnityComponentBindings.Register<DoorData, Door>(
 
 | 快照 | 证据 |
 |---|---|
+| 2026-08-31 / format v6 working tree | `npm run build` PASS；Node 67/67；GPU Instanced Mesh 示例与 CLI validate PASS；.NET Host 26/26；Unity focused 1/1、完整 EditMode 90/90；自动 smoke 记录 2500 instances、3 batches、2 submeshes、hierarchy 5 与 shear index 2499；Game View 人工观察未运行 |
 | 2026-08-31 / format v5 working tree | `npm run build` PASS；Node 67/67；.NET Host 26/26；Unity EditMode 89/89；Line Points Sprite 示例生成与两份资产 CLI validate PASS；Game View 人工观察未运行 |
 | 2026-08-31 / `6e9659b` | `npm run build` PASS；Node 65/65；.NET Host 26/26；Unity EditMode 87/87；Morph 示例与 CLI validate PASS |
 | 2026-08-30 local conversion snapshot | Voxel Frontier、LittleCubes、Warptracker 三个本地转换资产通过当时的 CLI validate、Unity 批处理导入和 `StandaloneWindows64` Player 构建；转换产物现为忽略文件 |
@@ -328,7 +348,8 @@ Three Unity Bridge 是场景、运行时与宿主桥，不是 JavaScript → C# 
 - Humanoid Avatar、重定向、IK、root motion、Animator Controller 与 Blend Tree 不在当前范围。
 - HDRP 专用映射、粒子与后处理尚未覆盖。
 - 外链纹理必须在导出时可读取；跨域资源仍受 CORS 约束。
-- `InstancedMesh` 当前展开为多个 GameObject，超大场景尚未使用 GPU instancing 或二进制载荷。
+- InstancedMesh 原生 GPU 路径不支持 Morph/Skinned instancing、每实例 matrix/color 动画、动态增删、每实例 Collider/MonoBehaviour/metadata/picking、每实例 light probe、透明逐实例排序或材质动画；这些逐实例对象语义应显式使用 `instancedMeshMode: "expanded"`。
+- 当前 GPU 路径使用 `Graphics.DrawMeshInstanced`，不是 Indirect、ComputeBuffer、GPU-driven culling、spatial chunking、LOD、DOTS 或 BatchRendererGroup；二进制 `.threeunity` payload 也尚未实现。
 - 项目组件只能通过显式白名单绑定；descriptor 本身不会把任意 JavaScript 翻译成 C#。
 
 ## 仓库结构
@@ -339,7 +360,7 @@ Three Unity Bridge 是场景、运行时与宿主桥，不是 JavaScript → C# 
 | `unity-package/` | UPM Runtime、Editor importer、Shaders、Samples 与 EditMode tests |
 | `webview-host/` | .NET 8 Windows WebView2 Host |
 | `webview-host-tests/` | Host 生命周期与恢复测试 |
-| `examples/` | 静态、骨骼动画、Morph、材质动画、Line/Points/Sprite、组件绑定与 logic adapter 示例 |
+| `examples/` | 静态、骨骼动画、Morph、GPU InstancedMesh、材质动画、Line/Points/Sprite、组件绑定与 logic adapter 示例 |
 | `tests/` | Node 合同、导出器与协议测试 |
 | `benchmarks/` | 输入与碰撞 transport 的可复现基准 |
 | `conversion-tools/` | 开源游戏 capture 与实体 Player 故障工具 |

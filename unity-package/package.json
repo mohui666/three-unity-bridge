@@ -43,6 +43,11 @@
       "displayName": "Line Points Sprite",
       "description": "Imports continuous and segmented lines, a closed loop, a grouped vertex-colored point cloud, and camera-facing sprites with looping transform and material animation.",
       "path": "Samples~/Line Points Sprite"
+    },
+    {
+      "displayName": "GPU Instanced Mesh",
+      "description": "Imports 2500 colored instances into one GameObject and renders them in three native GPU-instanced matrix batches.",
+      "path": "Samples~/GPU Instanced Mesh"
     }
   ]
 }

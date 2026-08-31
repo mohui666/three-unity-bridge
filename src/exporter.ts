@@ -33,6 +33,7 @@ import {
   ThreeUnityCamera,
   ThreeUnityComponent,
   ThreeUnityDocument,
+  ThreeUnityInstancedMesh,
   ThreeUnityLight,
   ThreeUnityMaterial,
   ThreeUnityMesh,
@@ -63,6 +64,8 @@ export interface ThreeUnityExportOptions {
   animationLoop?: boolean;
   /** Fixed sampling rate used to bake Three.js animation into local transform and morph-weight tracks. */
   animationSampleRate?: number;
+  /** Native GPU instancing is the default; expanded preserves one child node per instance. */
+  instancedMeshMode?: "gpu" | "expanded";
 }
 
 export interface ThreeUnityUserData {
@@ -78,6 +81,7 @@ export async function exportThreeUnity(
 ): Promise<ThreeUnityDocument> {
   const nodes: ThreeUnityNode[] = [];
   const meshes: ThreeUnityMesh[] = [];
+  const instancedMeshes: ThreeUnityInstancedMesh[] = [];
   const primitives: ThreeUnityPrimitive[] = [];
   const skins: ThreeUnitySkin[] = [];
   const materials: ThreeUnityMaterial[] = [];
@@ -92,7 +96,13 @@ export async function exportThreeUnity(
   const textureIds = new Map<Texture, string>();
   const visitedObjects = new Set<Object3D>();
   const exportedMaterialObjects = new Set<Object3D>();
+  const gpuInstancedMaterialObjects = new Set<Object3D>();
+  const expandedMaterialTargetNodeIds = new Map<Object3D, string[]>();
   const requiredBones = new Set<Object3D>();
+  const instancedMeshMode = options.instancedMeshMode ?? "gpu";
+  if (instancedMeshMode !== "gpu" && instancedMeshMode !== "expanded") {
+    throw new Error(`instancedMeshMode must be 'gpu' or 'expanded', received '${instancedMeshMode}'.`);
+  }
   const nodeIdFor = (object: Object3D): string => stableId("node", object.uuid, 0);
 
   const registerTexture = async (texture: Texture | null | undefined): Promise<string> => {
@@ -214,7 +224,11 @@ export async function exportThreeUnity(
       uv0: uv ? attributeToArray(uv) : [],
       colors: color ? attributeToArray(color, 4, 1) : [],
       indices: geometry.index ? Array.from(geometry.index.array, Number) : [],
-      groups: geometry.groups.map((group) => ({ start: group.start, count: group.count, materialIndex: group.materialIndex ?? 0 })),
+      groups: geometry.groups.map((group) => ({
+        start: group.start,
+        count: group.count,
+        materialIndex: Array.isArray(mesh.material) ? group.materialIndex ?? 0 : 0,
+      })),
       materialIds: materialIdList,
       ...skinAttributes,
       morphTargets,
@@ -368,6 +382,7 @@ export async function exportThreeUnity(
       layersMask: object.layers.mask,
       meshId: "",
       primitiveId: "",
+      instancedMeshId: "",
       skinId: "",
       morphWeights: [],
       metadataJson: safeJson(metadata),
@@ -382,6 +397,14 @@ export async function exportThreeUnity(
       if (morphTargetNames.length > 0) morphTargetNamesByObject.set(object, morphTargetNames);
       if ((object as SkinnedMesh).isSkinnedMesh) node.skinId = registerSkin(object as SkinnedMesh, id);
     }
+    if (isInstancedMesh && instancedMeshMode === "gpu") {
+      node.instancedMeshId = await exportGpuInstancedMesh(
+        object as Mesh & InstancedMeshLike,
+        registerMesh,
+        instancedMeshes,
+      );
+      gpuInstancedMaterialObjects.add(object);
+    }
     if (fatLine) {
       warnings.push(`${object.name || object.uuid}: ${object.type} fat-line renderables are preserved as transforms only.`);
     } else if (isLineLike(object)) {
@@ -395,7 +418,18 @@ export async function exportThreeUnity(
     if ((object as Camera).isCamera) node.camera = exportCamera(object as Camera);
     if ((object as Object3D & { isLight?: boolean }).isLight) node.light = exportLight(object as Object3D & LightLike);
     nodes.push(node);
-    if (isInstancedMesh) await exportInstances(object as Mesh & InstancedMeshLike, id, registerMesh, morphTargetNamesByMeshId, nodes, warnings);
+    if (isInstancedMesh && instancedMeshMode === "expanded") {
+      const instanceNodeIds = await exportExpandedInstances(
+        object as Mesh & InstancedMeshLike,
+        id,
+        registerMesh,
+        morphTargetNamesByMeshId,
+        nodes,
+        warnings,
+      );
+      exportedMaterialObjects.add(object);
+      expandedMaterialTargetNodeIds.set(object, instanceNodeIds);
+    }
     for (const child of object.children) await visit(child, id, requiredBones.has(child));
   };
 
@@ -417,6 +451,8 @@ export async function exportThreeUnity(
     visitedObjects,
     morphTargetNamesByObject,
     materialSlots,
+    gpuInstancedMaterialObjects,
+    expandedMaterialTargetNodeIds,
     nodeIdFor,
     warnings,
   );
@@ -429,6 +465,7 @@ export async function exportThreeUnity(
     unitScaleMeters: options.unitScaleMeters ?? 1,
     nodes,
     meshes,
+    instancedMeshes,
     primitives,
     skins,
     animations: animationResult.animations,
@@ -496,6 +533,8 @@ function exportAnimations(
   visitedObjects: Set<Object3D>,
   morphTargetNamesByObject: Map<Object3D, string[]>,
   materialSlots: ExportedMaterialSlot[],
+  gpuInstancedMaterialObjects: Set<Object3D>,
+  expandedMaterialTargetNodeIds: Map<Object3D, string[]>,
   nodeIdFor: (object: Object3D) => string,
   warnings: string[],
 ): { animations: ThreeUnityAnimation[]; defaultAnimationId: string; autoplayAnimation: boolean } {
@@ -556,6 +595,10 @@ function exportAnimations(
       } else if (transformProperty) {
         properties.add(transformProperty);
       } else if (materialProperty) {
+        if (target && gpuInstancedMaterialObjects.has(target as Object3D)) {
+          warnGpuInstancedMaterialTrack(target as Object3D, parsed, clip, track.name, warnings);
+          return false;
+        }
         if (!target || !validateMaterialSourceTrackTarget(target as Object3D, parsed, clip, track.name, exportedMaterialObjectSet, warnings)) return false;
         samplesMaterials = true;
       }
@@ -573,6 +616,7 @@ function exportAnimations(
       exportedObjects,
       morphTargetNamesByObject,
       materialSlots,
+      expandedMaterialTargetNodeIds,
       nodeIdFor,
     );
     if (supportedTracks.length > 0 && tracks.length === 0) {
@@ -618,6 +662,7 @@ function bakeAnimationClip(
   objects: Object3D[],
   morphTargetNamesByObject: Map<Object3D, string[]>,
   materialSlots: ExportedMaterialSlot[],
+  expandedMaterialTargetNodeIds: Map<Object3D, string[]>,
   nodeIdFor: (object: Object3D) => string,
 ): ThreeUnityAnimationTrack[] {
   if (sourceTracks.length === 0) return [];
@@ -752,16 +797,19 @@ function bakeAnimationClip(
     for (const property of MATERIAL_ANIMATION_PROPERTIES) {
       const dimensions = initialState[property].length;
       if (!sampledValuesChange(sampledChannels[property], initialState[property], dimensions)) continue;
-      tracks.push({
-        targetNodeId: nodeIdFor(slot.object),
-        property,
-        morphTargetIndex: -1,
-        materialIndex: slot.materialIndex,
-        times: [...times],
-        values: sampledChannels[property],
-        interpolation: "linear",
-        baked: true,
-      });
+      const targetNodeIds = expandedMaterialTargetNodeIds.get(slot.object) ?? [nodeIdFor(slot.object)];
+      for (const targetNodeId of targetNodeIds) {
+        tracks.push({
+          targetNodeId,
+          property,
+          morphTargetIndex: -1,
+          materialIndex: slot.materialIndex,
+          times: [...times],
+          values: sampledChannels[property],
+          interpolation: "linear",
+          baked: true,
+        });
+      }
     }
   }
   return tracks;
@@ -839,6 +887,20 @@ function isSupportedMaterialSourceProperty(objectName: string | undefined, prope
 
 function isMultiMaterialUvTrackName(trackName: string): boolean {
   return /\.material\[[^\]]+\]\.map\.(?:offset|repeat)(?:\[[^\]]+\])?$/.test(trackName);
+}
+
+function warnGpuInstancedMaterialTrack(
+  target: Object3D,
+  parsed: ReturnType<typeof PropertyBinding.parseTrackName>,
+  clip: AnimationClip,
+  trackName: string,
+  warnings: string[],
+): void {
+  const materialIndex = parsed.objectIndex ?? 0;
+  const property = `${parsed.objectName}.${parsed.propertyName}`;
+  warnings.push(
+    `Animation '${clip.name || clip.uuid}' track '${trackName}' targets GPU InstancedMesh node '${target.name || target.uuid}', material index ${materialIndex}, property '${property}'; native instanced material animation is not supported.`,
+  );
 }
 
 function validateMaterialSourceTrackTarget(
@@ -1082,8 +1144,11 @@ interface CameraLike {
 
 interface InstancedMeshLike {
   count: number;
-  instanceColor?: unknown;
+  instanceMatrix: BufferAttribute;
+  instanceColor?: BufferAttribute | null;
+  morphTexture?: Texture | null;
   getMatrixAt(index: number, matrix: import("three").Matrix4): void;
+  getColorAt(index: number, color: Color): void;
 }
 
 interface MaterialRenderable extends Object3D {
@@ -1109,25 +1174,98 @@ function exportLight(light: LightLike): ThreeUnityLight {
   };
 }
 
-async function exportInstances(
+async function exportGpuInstancedMesh(
+  object: Mesh & InstancedMeshLike,
+  registerMesh: (mesh: Mesh) => Promise<string>,
+  instancedMeshes: ThreeUnityInstancedMesh[],
+): Promise<string> {
+  const label = `InstancedMesh '${object.name || object.uuid}'`;
+  if (!Number.isInteger(object.count) || object.count < 0) {
+    throw new Error(`${label} count must be a non-negative integer, received '${object.count}'.`);
+  }
+  if (object.count > object.instanceMatrix.count) {
+    throw new Error(`${label} count ${object.count} exceeds instanceMatrix count ${object.instanceMatrix.count}.`);
+  }
+  if (hasMorphAttributes(object.geometry) || object.morphTexture) {
+    throw new Error(`${label} uses morph targets, which are not supported in GPU mode; use a normal Mesh or instancedMeshMode: 'expanded'.`);
+  }
+  validateGpuInstancedMeshGroups(object);
+
+  const meshId = await registerMesh(object);
+  const id = stableId("instanced_mesh", object.uuid, instancedMeshes.length);
+  const matrices: number[] = [];
+  const colors: number[] = [];
+  const matrix = object.matrix.clone();
+  const color = new Color();
+  const exportsColors = Boolean(object.instanceColor);
+  for (let index = 0; index < object.count; index += 1) {
+    object.getMatrixAt(index, matrix);
+    matrices.push(...finiteAffineMatrixElements(matrix.elements, `${label} instance ${index} matrix`));
+    if (exportsColors) {
+      object.getColorAt(index, color);
+      const components = [color.r, color.g, color.b, 1];
+      for (const [component, value] of components.entries()) {
+        if (!Number.isFinite(value)) throw new Error(`${label} instance ${index} color component ${component} must be finite, received '${value}'.`);
+      }
+      colors.push(...components);
+    }
+  }
+  instancedMeshes.push({
+    id,
+    name: `${object.name || "InstancedMesh"} Instances`,
+    meshId,
+    count: object.count,
+    matrices,
+    colors,
+  });
+  return id;
+}
+
+function validateGpuInstancedMeshGroups(object: Mesh & InstancedMeshLike): void {
+  const label = `InstancedMesh '${object.name || object.uuid}'`;
+  const materials = Array.isArray(object.material) ? object.material : [object.material];
+  if (materials.length === 0) throw new Error(`${label} must have at least one material.`);
+  const position = requiredAttribute(object.geometry, "position");
+  const elementCount = object.geometry.index?.count ?? position.count;
+  for (const [groupIndex, group] of object.geometry.groups.entries()) {
+    const materialIndex = Array.isArray(object.material) ? group.materialIndex ?? 0 : 0;
+    if (!Number.isInteger(materialIndex) || materialIndex < 0 || materialIndex >= materials.length) {
+      throw new Error(`${label} group ${groupIndex} references material index '${materialIndex}' but has ${materials.length} material slot(s).`);
+    }
+    if (
+      !Number.isInteger(group.start)
+      || group.start < 0
+      || !Number.isInteger(group.count)
+      || group.count < 0
+      || group.start + group.count > elementCount
+    ) {
+      throw new Error(`${label} group ${groupIndex} start/count '${group.start}/${group.count}' is outside the mesh element stream (${elementCount}).`);
+    }
+  }
+}
+
+async function exportExpandedInstances(
   object: Mesh & InstancedMeshLike,
   parentId: string,
   registerMesh: (mesh: Mesh) => Promise<string>,
   morphTargetNamesByMeshId: Map<string, string[]>,
   nodes: ThreeUnityNode[],
   warnings: string[],
-): Promise<void> {
+): Promise<string[]> {
   const meshId = await registerMesh(object);
   const morphTargetCount = morphTargetNamesByMeshId.get(meshId)?.length ?? 0;
   const matrix = object.matrix.clone();
   const position = new Vector3();
   const rotation = new Quaternion();
   const scale = new Vector3();
+  const nodeIds: string[] = [];
   for (let index = 0; index < object.count; index += 1) {
     object.getMatrixAt(index, matrix);
     matrix.decompose(position, rotation, scale);
+    const id = `${stableId("node", object.uuid, nodes.length)}_instance_${index}`;
+    nodeIds.push(id);
     nodes.push({
-      id: `${stableId("node", object.uuid, nodes.length)}_instance_${index}`,
+      id,
       name: `${object.name || "InstancedMesh"} ${index}`,
       parentId,
       visible: true,
@@ -1137,13 +1275,17 @@ async function exportInstances(
       layersMask: object.layers.mask,
       meshId,
       primitiveId: "",
+      instancedMeshId: "",
       skinId: "",
       morphWeights: Array.from({ length: morphTargetCount }, () => 0),
       metadataJson: `{\"threeUnityInstance\":${index}}`,
       components: [],
     });
   }
-  if (object.instanceColor) warnings.push(`${object.name || object.uuid}: per-instance colors are not exported in format v5.`);
+  if (object.instanceColor) {
+    warnings.push(`${object.name || object.uuid}: per-instance colors are not exported when instancedMeshMode is 'expanded'.`);
+  }
+  return nodeIds;
 }
 
 function readMorphAttributes(mesh: Mesh, semantic: "position" | "normal"): BufferAttribute[] {
@@ -1290,6 +1432,20 @@ function normalizeSkinAttributes(mesh: SkinnedMesh, position: BufferAttribute): 
 function finiteMatrixElements(elements: readonly number[], label: string): number[] {
   if (elements.length !== 16 || elements.some((value) => !Number.isFinite(value))) throw new Error(`${label} must contain 16 finite values.`);
   return Array.from(elements);
+}
+
+function finiteAffineMatrixElements(elements: readonly number[], label: string): number[] {
+  const values = finiteMatrixElements(elements, label);
+  const tolerance = 1e-6;
+  if (
+    Math.abs(values[3]) > tolerance
+    || Math.abs(values[7]) > tolerance
+    || Math.abs(values[11]) > tolerance
+    || Math.abs(values[15] - 1) > tolerance
+  ) {
+    throw new Error(`${label} must be an affine matrix.`);
+  }
+  return values;
 }
 
 function requiredAttribute(geometry: BufferGeometry, name: string): BufferAttribute {
@@ -1461,12 +1617,12 @@ async function encodeTexture(texture: Texture, warnings: string[]): Promise<Pick
   const height = image?.height ?? 0;
   if (image?.data && width > 0 && height > 0) {
     if (!(image.data instanceof Uint8Array) && !(image.data instanceof Uint8ClampedArray)) {
-      warnings.push(`${texture.name || texture.uuid}: only unsigned-byte DataTexture is supported in format v5.`);
+      warnings.push(`${texture.name || texture.uuid}: only unsigned-byte DataTexture is supported in format v6.`);
       return { width, height, encoding: "rgba8", data: "" };
     }
     const bytes = image.data instanceof Uint8Array ? image.data : new Uint8Array(image.data);
     if (bytes.length !== width * height * 4) {
-      warnings.push(`${texture.name || texture.uuid}: only 4-channel Uint8 DataTexture is supported in format v5.`);
+      warnings.push(`${texture.name || texture.uuid}: only 4-channel Uint8 DataTexture is supported in format v6.`);
       return { width, height, encoding: "rgba8", data: "" };
     }
     return { width, height, encoding: "rgba8", data: bytesToBase64(bytes) };

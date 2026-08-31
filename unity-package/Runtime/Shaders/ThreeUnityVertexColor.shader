@@ -27,6 +27,7 @@ Shader "ThreeUnity/Vertex Color"
             #pragma vertex vert
             #pragma fragment frag
             #pragma multi_compile_fwdbase
+            #pragma multi_compile_instancing
             #include "UnityCG.cginc"
             #include "Lighting.cginc"
             #include "AutoLight.cginc"
@@ -37,6 +38,7 @@ Shader "ThreeUnity/Vertex Color"
                 float3 normal : NORMAL;
                 float2 uv : TEXCOORD0;
                 fixed4 color : COLOR;
+                UNITY_VERTEX_INPUT_INSTANCE_ID
             };
 
             struct v2f
@@ -58,6 +60,7 @@ Shader "ThreeUnity/Vertex Color"
             v2f vert(appdata input)
             {
                 v2f output;
+                UNITY_SETUP_INSTANCE_ID(input);
                 output.pos = UnityObjectToClipPos(input.vertex);
                 output.uv = TRANSFORM_TEX(input.uv, _MainTex);
                 output.color = input.color;

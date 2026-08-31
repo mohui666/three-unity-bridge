@@ -8,7 +8,7 @@ using UnityEngine.Rendering;
 
 namespace ThreeUnity.Bridge.Editor
 {
-    [ScriptedImporter(9, "threeunity")]
+    [ScriptedImporter(10, "threeunity")]
     public sealed class ThreeUnityImporter : ScriptedImporter
     {
         [SerializeField] private bool importCameras = true;
@@ -28,9 +28,9 @@ namespace ThreeUnity.Bridge.Editor
                 return;
             }
 
-            if (document == null || document.format != "three-unity-scene" || (document.version != 1 && document.version != 2 && document.version != 3 && document.version != 4 && document.version != 5))
+            if (document == null || document.format != "three-unity-scene" || (document.version != 1 && document.version != 2 && document.version != 3 && document.version != 4 && document.version != 5 && document.version != 6))
             {
-                context.LogImportError("Unsupported document. Expected three-unity-scene format version 1, 2, 3, 4, or 5.");
+                context.LogImportError("Unsupported document. Expected three-unity-scene format version 1, 2, 3, 4, 5, or 6.");
                 return;
             }
 
@@ -43,6 +43,10 @@ namespace ThreeUnity.Bridge.Editor
             var materials = ImportMaterials(context, materialRecords, textures, materialCapabilities, document.version);
             var meshes = ImportMeshes(context, document.meshes ?? Array.Empty<MeshRecord>(), document.unitScaleMeters);
             var primitives = ImportPrimitives(context, document.primitives ?? Array.Empty<PrimitiveRecord>(), materialRecords, document.unitScaleMeters);
+            var instancedMeshes = IndexInstancedMeshes(document.version >= 6
+                ? document.instancedMeshes ?? Array.Empty<InstancedMeshRecord>()
+                : Array.Empty<InstancedMeshRecord>());
+            var instancedColorMaterials = new Dictionary<string, Material>();
             var skins = IndexSkins(document.skins ?? Array.Empty<SkinRecord>());
             var objects = new Dictionary<string, GameObject>();
             var importedNames = BuildImportedNodeNames(document.nodes ?? Array.Empty<NodeRecord>(), document.version >= 2);
@@ -71,10 +75,25 @@ namespace ThreeUnity.Bridge.Editor
             foreach (var node in document.nodes ?? Array.Empty<NodeRecord>())
             {
                 if (!objects.TryGetValue(node.id, out var gameObject)) continue;
-                if (!string.IsNullOrEmpty(node.meshId) && !string.IsNullOrEmpty(node.primitiveId))
-                    throw new InvalidDataException($"Node '{node.id}' cannot reference mesh '{node.meshId}' and primitive '{node.primitiveId}' at the same time.");
+                var renderableReferenceCount =
+                    (string.IsNullOrEmpty(node.meshId) ? 0 : 1) +
+                    (string.IsNullOrEmpty(node.primitiveId) ? 0 : 1) +
+                    (string.IsNullOrEmpty(node.instancedMeshId) ? 0 : 1);
+                if (renderableReferenceCount > 1)
+                    throw new InvalidDataException($"Node '{node.id}' cannot reference mesh '{node.meshId}', primitive '{node.primitiveId}', and instanced mesh '{node.instancedMeshId}' at the same time.");
                 AttachMesh(context, gameObject, node, meshes, materials, document.meshes, skins, objects, document.unitScaleMeters);
                 AttachPrimitive(gameObject, node, primitives, materials);
+                AttachInstancedMesh(
+                    context,
+                    gameObject,
+                    node,
+                    instancedMeshes,
+                    meshes,
+                    document.meshes ?? Array.Empty<MeshRecord>(),
+                    materials,
+                    materialRecords,
+                    instancedColorMaterials,
+                    document.unitScaleMeters);
                 if (importCameras && node.camera != null && !string.IsNullOrEmpty(node.camera.type))
                     AttachCamera(gameObject, node.camera, document.unitScaleMeters);
                 if (importLights && node.light != null && !string.IsNullOrEmpty(node.light.type))
@@ -136,6 +155,18 @@ namespace ThreeUnity.Bridge.Editor
         {
             var result = new Dictionary<string, SkinRecord>();
             foreach (var record in records) result.Add(record.id, record);
+            return result;
+        }
+
+        private static Dictionary<string, InstancedMeshRecord> IndexInstancedMeshes(InstancedMeshRecord[] records)
+        {
+            var result = new Dictionary<string, InstancedMeshRecord>();
+            foreach (var record in records)
+            {
+                if (record == null || string.IsNullOrEmpty(record.id))
+                    throw new InvalidDataException("An instanced mesh record is missing its id.");
+                result.Add(record.id, record);
+            }
             return result;
         }
 
@@ -619,6 +650,193 @@ namespace ThreeUnity.Bridge.Editor
             AssignPrimitiveMaterials(renderer, primitive.record, materials);
         }
 
+        private void AttachInstancedMesh(
+            AssetImportContext context,
+            GameObject gameObject,
+            NodeRecord node,
+            Dictionary<string, InstancedMeshRecord> instancedMeshes,
+            Dictionary<string, Mesh> meshes,
+            MeshRecord[] meshRecords,
+            Dictionary<string, Material> materials,
+            MaterialRecord[] materialRecords,
+            Dictionary<string, Material> instancedColorMaterials,
+            float unitScale)
+        {
+            if (string.IsNullOrEmpty(node.instancedMeshId)) return;
+            if (!instancedMeshes.TryGetValue(node.instancedMeshId, out var record))
+                throw new InvalidDataException($"Node '{node.id}' references missing instanced mesh '{node.instancedMeshId}'.");
+            if (record.count < 0)
+                throw new InvalidDataException($"Instanced mesh '{record.id}' has negative count {record.count}.");
+            if (string.IsNullOrEmpty(record.meshId) || !meshes.TryGetValue(record.meshId, out var mesh))
+                throw new InvalidDataException($"Instanced mesh '{record.id}' references missing mesh '{record.meshId}'.");
+
+            MeshRecord meshRecord = null;
+            foreach (var candidate in meshRecords)
+            {
+                if (candidate.id == record.meshId)
+                {
+                    meshRecord = candidate;
+                    break;
+                }
+            }
+            if (meshRecord == null)
+                throw new InvalidDataException($"Instanced mesh '{record.id}' references missing mesh record '{record.meshId}'.");
+            if ((meshRecord.skinIndices != null && meshRecord.skinIndices.Length > 0) ||
+                (meshRecord.skinWeights != null && meshRecord.skinWeights.Length > 0))
+                throw new InvalidDataException($"Instanced mesh '{record.id}' cannot use skinned mesh '{record.meshId}'. Export it with instancedMeshMode: \"expanded\".");
+            if (meshRecord.morphTargets != null && meshRecord.morphTargets.Length > 0)
+                throw new InvalidDataException($"Instanced mesh '{record.id}' cannot use morph mesh '{record.meshId}'. Export it with instancedMeshMode: \"expanded\".");
+            if (!string.IsNullOrEmpty(node.skinId))
+                throw new InvalidDataException($"Instanced node '{node.id}' cannot reference skin '{node.skinId}'. Export it with instancedMeshMode: \"expanded\".");
+            if (node.morphWeights != null && node.morphWeights.Length > 0)
+                throw new InvalidDataException($"Instanced node '{node.id}' cannot provide morph weights. Export it with instancedMeshMode: \"expanded\".");
+
+            var sourceMatrices = record.matrices ?? Array.Empty<float>();
+            var expectedMatrixValueCount = (long)record.count * 16;
+            if (sourceMatrices.LongLength != expectedMatrixValueCount)
+                throw new InvalidDataException($"Instanced mesh '{record.id}' has {sourceMatrices.LongLength} matrix values for {record.count} instances; expected {expectedMatrixValueCount}.");
+            var localMatrices = new Matrix4x4[record.count];
+            const float affineTolerance = 0.00001f;
+            for (var index = 0; index < localMatrices.Length; index++)
+            {
+                var source = ReadThreeMatrix(sourceMatrices, index * 16);
+                for (var row = 0; row < 4; row++)
+                for (var column = 0; column < 4; column++)
+                {
+                    if (!IsFinite(source[row, column]))
+                        throw new InvalidDataException($"Instanced mesh '{record.id}' matrix {index} contains a non-finite value at row {row}, column {column}.");
+                }
+                if (Mathf.Abs(source.m30) > affineTolerance ||
+                    Mathf.Abs(source.m31) > affineTolerance ||
+                    Mathf.Abs(source.m32) > affineTolerance ||
+                    Mathf.Abs(source.m33 - 1f) > affineTolerance)
+                    throw new InvalidDataException($"Instanced mesh '{record.id}' matrix {index} is not affine.");
+                localMatrices[index] = ConvertMatrix(source, unitScale);
+            }
+
+            var sourceColors = record.colors ?? Array.Empty<float>();
+            var expectedColorValueCount = (long)record.count * 4;
+            if (sourceColors.Length != 0 && sourceColors.LongLength != expectedColorValueCount)
+                throw new InvalidDataException($"Instanced mesh '{record.id}' has {sourceColors.LongLength} color values for {record.count} instances; expected zero or {expectedColorValueCount}.");
+            for (var index = 0; index < sourceColors.Length; index++)
+            {
+                if (!IsFinite(sourceColors[index]))
+                    throw new InvalidDataException($"Instanced mesh '{record.id}' colors contain a non-finite value at index {index}.");
+            }
+            var instanceColors = sourceColors.Length == 0 ? Array.Empty<Color>() : ReadColors(sourceColors);
+            var sharedMaterials = ResolveInstancedMaterials(
+                context,
+                record,
+                meshRecord,
+                materials,
+                materialRecords,
+                instancedColorMaterials,
+                instanceColors.Length > 0);
+
+            if (generateColliders)
+                context.LogImportWarning($"Instanced node '{node.id}' does not generate per-instance colliders. Re-export with instancedMeshMode: \"expanded\" to use generated colliders.");
+            gameObject.AddComponent<ThreeUnityInstancedRenderer>().Initialize(mesh, sharedMaterials, localMatrices, instanceColors);
+        }
+
+        private static Material[] ResolveInstancedMaterials(
+            AssetImportContext context,
+            InstancedMeshRecord instancedRecord,
+            MeshRecord meshRecord,
+            Dictionary<string, Material> materials,
+            MaterialRecord[] materialRecords,
+            Dictionary<string, Material> instancedColorMaterials,
+            bool useInstanceColors)
+        {
+            var materialIds = meshRecord.materialIds ?? Array.Empty<string>();
+            if (materialIds.Length == 0)
+                throw new InvalidDataException($"Instanced mesh '{instancedRecord.id}' mesh '{meshRecord.id}' has no materials.");
+            var groups = meshRecord.groups ?? Array.Empty<MeshGroupRecord>();
+            var shared = new Material[Math.Max(1, groups.Length)];
+            for (var slot = 0; slot < shared.Length; slot++)
+            {
+                var materialIndex = groups.Length > 0 ? groups[slot].materialIndex : 0;
+                if (materialIndex < 0 || materialIndex >= materialIds.Length)
+                    throw new InvalidDataException($"Instanced mesh '{instancedRecord.id}' renderer slot {slot} references source material index {materialIndex}, but mesh '{meshRecord.id}' has {materialIds.Length} materials.");
+                var materialId = materialIds[materialIndex];
+                if (!materials.TryGetValue(materialId, out var material) || material == null)
+                    throw new InvalidDataException($"Instanced mesh '{instancedRecord.id}' references missing material '{materialId}'.");
+                material.enableInstancing = true;
+                shared[slot] = useInstanceColors
+                    ? GetOrCreateInstancedColorMaterial(context, materialId, material, materialRecords, instancedColorMaterials)
+                    : material;
+            }
+            return shared;
+        }
+
+        private static Material GetOrCreateInstancedColorMaterial(
+            AssetImportContext context,
+            string materialId,
+            Material baseMaterial,
+            MaterialRecord[] materialRecords,
+            Dictionary<string, Material> instancedColorMaterials)
+        {
+            if (instancedColorMaterials.TryGetValue(materialId, out var existing)) return existing;
+            var shader = Shader.Find("ThreeUnity/Instanced Surface");
+            if (shader == null)
+                throw new InvalidDataException($"Material '{materialId}' requires per-instance color, but shader 'ThreeUnity/Instanced Surface' was not found.");
+
+            MaterialRecord materialRecord = null;
+            foreach (var candidate in materialRecords)
+            {
+                if (candidate.id == materialId)
+                {
+                    materialRecord = candidate;
+                    break;
+                }
+            }
+            if (materialRecord == null)
+                throw new InvalidDataException($"Material record '{materialId}' was not found while creating its instanced-color variant.");
+
+            var baseColor = baseMaterial.HasProperty("_BaseColor")
+                ? baseMaterial.GetColor("_BaseColor")
+                : baseMaterial.HasProperty("_Color") ? baseMaterial.GetColor("_Color") : Color.white;
+            var baseTextureProperty = baseMaterial.HasProperty("_BaseMap") ? "_BaseMap" : "_MainTex";
+            var baseTexture = baseMaterial.HasProperty(baseTextureProperty) ? baseMaterial.GetTexture(baseTextureProperty) : null;
+            var baseTextureScale = baseMaterial.HasProperty(baseTextureProperty) ? baseMaterial.GetTextureScale(baseTextureProperty) : Vector2.one;
+            var baseTextureOffset = baseMaterial.HasProperty(baseTextureProperty) ? baseMaterial.GetTextureOffset(baseTextureProperty) : Vector2.zero;
+
+            var variant = new Material(baseMaterial)
+            {
+                name = $"{baseMaterial.name} Instanced Color",
+                shader = shader,
+                enableInstancing = true,
+            };
+            variant.renderQueue = baseMaterial.renderQueue;
+            SetColor(variant, "_BaseColor", "_Color", baseColor);
+            if (baseTexture != null)
+            {
+                if (variant.HasProperty("_BaseMap")) variant.SetTexture("_BaseMap", baseTexture);
+                if (variant.HasProperty("_MainTex")) variant.SetTexture("_MainTex", baseTexture);
+            }
+            if (variant.HasProperty("_BaseMap"))
+            {
+                variant.SetTextureScale("_BaseMap", baseTextureScale);
+                variant.SetTextureOffset("_BaseMap", baseTextureOffset);
+            }
+            if (variant.HasProperty("_MainTex"))
+            {
+                variant.SetTextureScale("_MainTex", baseTextureScale);
+                variant.SetTextureOffset("_MainTex", baseTextureOffset);
+            }
+            SetFloat(variant, "_UseVertexColor", materialRecord.vertexColors ? 1f : 0f);
+            SetFloat(variant, "_Unlit", materialRecord.unlit ? 1f : 0f);
+            SetFloat(variant, "_Metallic", materialRecord.metallic);
+            SetFloat(variant, "_Smoothness", 1f - Mathf.Clamp01(materialRecord.roughness));
+            SetFloat(variant, "_Glossiness", 1f - Mathf.Clamp01(materialRecord.roughness));
+            SetFloat(variant, "_Cutoff", materialRecord.alphaCutoff);
+            if (variant.HasProperty("_EmissionColor"))
+                variant.SetColor("_EmissionColor", ReadColor(materialRecord.emissive, Color.black));
+            ConfigureSurface(variant, materialRecord.transparent || baseMaterial.renderQueue >= (int)RenderQueue.Transparent, materialRecord.doubleSided);
+            context.AddObjectToAsset($"instanced_color_{materialId}", variant);
+            instancedColorMaterials.Add(materialId, variant);
+            return variant;
+        }
+
         private static void AttachSkinnedMesh(
             AssetImportContext context,
             GameObject gameObject,
@@ -769,6 +987,11 @@ namespace ThreeUnity.Bridge.Editor
                         throw new InvalidDataException($"Animation '{record.id}' references missing target node '{track.targetNodeId}'.");
                     if (IsMaterialAnimationProperty(track.property))
                     {
+                        if (nodesById.TryGetValue(track.targetNodeId, out var materialNode) && !string.IsNullOrEmpty(materialNode.instancedMeshId))
+                        {
+                            context.LogImportWarning($"Animation '{record.id}' material track for native instanced node '{track.targetNodeId}', material index {track.materialIndex}, property '{track.property}' was skipped. Native instanced material animation is not supported; export with instancedMeshMode: \"expanded\" to retain it.");
+                            continue;
+                        }
                         AddMaterialAnimationBindings(
                             materialBindings,
                             target,
@@ -1403,6 +1626,8 @@ namespace ThreeUnity.Bridge.Editor
             return converted;
         }
 
+        private static bool IsFinite(float value) => !float.IsNaN(value) && !float.IsInfinity(value);
+
         private static Color ReadColor(float[] values, Color fallback) => values != null && values.Length >= 3 ? new Color(values[0], values[1], values[2], values.Length >= 4 ? values[3] : 1f) : fallback;
 
         private static int[] SequentialIndices(int count)
@@ -1431,6 +1656,7 @@ namespace ThreeUnity.Bridge.Editor
             public NodeRecord[] nodes;
             public MeshRecord[] meshes;
             public PrimitiveRecord[] primitives;
+            public InstancedMeshRecord[] instancedMeshes;
             public MaterialRecord[] materials;
             public TextureRecord[] textures;
             public SkinRecord[] skins;
@@ -1453,6 +1679,7 @@ namespace ThreeUnity.Bridge.Editor
             public int layersMask = 1;
             public string meshId;
             public string primitiveId;
+            public string instancedMeshId;
             public string skinId;
             public float[] morphWeights;
             public CameraRecord camera;
@@ -1466,6 +1693,7 @@ namespace ThreeUnity.Bridge.Editor
         [Serializable] private sealed class ComponentRecord { public string type; public string dataJson; }
         [Serializable] private sealed class MeshRecord { public string id; public string name; public float[] positions; public float[] normals; public float[] uv0; public float[] colors; public int[] indices; public MeshGroupRecord[] groups; public string[] materialIds; public int[] skinIndices; public float[] skinWeights; public MorphTargetRecord[] morphTargets; }
         [Serializable] private sealed class PrimitiveRecord { public string id; public string name; public string type; public float[] positions; public float[] colors; public int[] indices; public MeshGroupRecord[] groups; public string[] materialIds; public float[] spriteCenter; }
+        [Serializable] private sealed class InstancedMeshRecord { public string id; public string name; public string meshId; public int count; public float[] matrices; public float[] colors; }
         [Serializable] private sealed class MorphTargetRecord { public string name; public float[] positionDeltas; public float[] normalDeltas; }
         [Serializable] private sealed class MeshGroupRecord { public int start; public int count; public int materialIndex; }
         [Serializable] private sealed class SkinRecord { public string id; public string name; public string meshNodeId; public string[] boneNodeIds; public string rootBoneNodeId; public float[] inverseBindMatrices; public float[] bindMatrix; }
