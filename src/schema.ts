@@ -1,6 +1,7 @@
 export const THREE_UNITY_FORMAT = "three-unity-scene" as const;
 export const THREE_UNITY_LEGACY_VERSION = 1 as const;
-export const THREE_UNITY_VERSION = 2 as const;
+export const THREE_UNITY_SKINNED_VERSION = 2 as const;
+export const THREE_UNITY_VERSION = 3 as const;
 
 export type Vec2 = [number, number];
 export type Vec3 = [number, number, number];
@@ -56,6 +57,7 @@ export interface ThreeUnityNode {
   layersMask: number;
   meshId: string;
   skinId: string;
+  morphWeights: number[];
   camera?: ThreeUnityCamera;
   light?: ThreeUnityLight;
   metadataJson: string;
@@ -101,6 +103,13 @@ export interface ThreeUnityMesh {
   materialIds: string[];
   skinIndices: number[];
   skinWeights: number[];
+  morphTargets: ThreeUnityMorphTarget[];
+}
+
+export interface ThreeUnityMorphTarget {
+  name: string;
+  positionDeltas: number[];
+  normalDeltas: number[];
 }
 
 export interface ThreeUnitySkin {
@@ -115,11 +124,12 @@ export interface ThreeUnitySkin {
   bindMatrix: number[];
 }
 
-export type ThreeUnityAnimationProperty = "position" | "quaternion" | "scale";
+export type ThreeUnityAnimationProperty = "position" | "quaternion" | "scale" | "morphWeight";
 
 export interface ThreeUnityAnimationTrack {
   targetNodeId: string;
   property: ThreeUnityAnimationProperty;
+  morphTargetIndex: number;
   times: number[];
   values: number[];
   interpolation: "linear";
@@ -185,8 +195,8 @@ export function validateDocument(value: unknown): ValidationResult {
   const document = value as Partial<ThreeUnityDocument>;
   if (document.format !== THREE_UNITY_FORMAT) errors.push(`format must be '${THREE_UNITY_FORMAT}'.`);
   const version = (document as { version?: unknown }).version;
-  if (version !== THREE_UNITY_LEGACY_VERSION && version !== THREE_UNITY_VERSION) {
-    errors.push(`version must be ${THREE_UNITY_LEGACY_VERSION} or ${THREE_UNITY_VERSION}.`);
+  if (version !== THREE_UNITY_LEGACY_VERSION && version !== THREE_UNITY_SKINNED_VERSION && version !== THREE_UNITY_VERSION) {
+    errors.push(`version must be ${THREE_UNITY_LEGACY_VERSION}, ${THREE_UNITY_SKINNED_VERSION}, or ${THREE_UNITY_VERSION}.`);
   }
   if (!Array.isArray(document.nodes)) errors.push("nodes must be an array.");
   if (!Array.isArray(document.meshes)) errors.push("meshes must be an array.");
@@ -200,13 +210,14 @@ export function validateDocument(value: unknown): ValidationResult {
     errors.push("runtime must be an object when present.");
   }
 
-  const v2 = version === THREE_UNITY_VERSION;
+  const v2OrLater = version === THREE_UNITY_SKINNED_VERSION || version === THREE_UNITY_VERSION;
+  const v3 = version === THREE_UNITY_VERSION;
   const documentV2 = document as Partial<ThreeUnityDocument>;
-  if (v2) {
-    if (!Array.isArray(documentV2.skins)) errors.push("skins must be an array in version 2.");
-    if (!Array.isArray(documentV2.animations)) errors.push("animations must be an array in version 2.");
-    if (typeof documentV2.defaultAnimationId !== "string") errors.push("defaultAnimationId must be a string in version 2.");
-    if (typeof documentV2.autoplayAnimation !== "boolean") errors.push("autoplayAnimation must be a boolean in version 2.");
+  if (v2OrLater) {
+    if (!Array.isArray(documentV2.skins)) errors.push("skins must be an array in version 2 or later.");
+    if (!Array.isArray(documentV2.animations)) errors.push("animations must be an array in version 2 or later.");
+    if (typeof documentV2.defaultAnimationId !== "string") errors.push("defaultAnimationId must be a string in version 2 or later.");
+    if (typeof documentV2.autoplayAnimation !== "boolean") errors.push("autoplayAnimation must be a boolean in version 2 or later.");
   }
 
   const nodeIds = new Set<string>();
@@ -220,7 +231,8 @@ export function validateDocument(value: unknown): ValidationResult {
       if (!Array.isArray(node.position) || node.position.length !== 3) errors.push(`nodes[${index}].position must have 3 values.`);
       if (!Array.isArray(node.quaternion) || node.quaternion.length !== 4) errors.push(`nodes[${index}].quaternion must have 4 values.`);
       if (!Array.isArray(node.scale) || node.scale.length !== 3) errors.push(`nodes[${index}].scale must have 3 values.`);
-      if (v2 && typeof node.skinId !== "string") errors.push(`nodes[${index}].skinId must be a string in version 2.`);
+      if (v2OrLater && typeof node.skinId !== "string") errors.push(`nodes[${index}].skinId must be a string in version 2 or later.`);
+      if (v3 && !isFiniteNumberArray(node.morphWeights)) errors.push(`nodes[${index}].morphWeights must contain finite values in version 3.`);
     }
     for (const node of document.nodes) {
       if (node.parentId && !nodeIds.has(node.parentId)) errors.push(`Node '${node.id}' references missing parent '${node.parentId}'.`);
@@ -233,13 +245,20 @@ export function validateDocument(value: unknown): ValidationResult {
       if (!mesh.id) errors.push(`meshes[${index}].id is required.`);
       if (meshesById.has(mesh.id)) errors.push(`Duplicate mesh id '${mesh.id}'.`);
       meshesById.set(mesh.id, mesh);
-      if (v2 && !Array.isArray(mesh.skinIndices)) errors.push(`meshes[${index}].skinIndices must be an array in version 2.`);
-      if (v2 && !Array.isArray(mesh.skinWeights)) errors.push(`meshes[${index}].skinWeights must be an array in version 2.`);
+      if (v2OrLater && !Array.isArray(mesh.skinIndices)) errors.push(`meshes[${index}].skinIndices must be an array in version 2 or later.`);
+      if (v2OrLater && !Array.isArray(mesh.skinWeights)) errors.push(`meshes[${index}].skinWeights must be an array in version 2 or later.`);
+      if (v3) validateMorphTargets(mesh, `meshes[${index}]`, errors);
     }
   }
 
   for (const node of nodesById.values()) {
     if (node.meshId && !meshesById.has(node.meshId)) errors.push(`Node '${node.id}' references missing mesh '${node.meshId}'.`);
+    if (v3 && Array.isArray(node.morphWeights)) {
+      const expectedCount = node.meshId ? meshesById.get(node.meshId)?.morphTargets?.length ?? 0 : 0;
+      if (node.morphWeights.length !== expectedCount) {
+        errors.push(`Node '${node.id}' morphWeights length must match its mesh morph target count (${expectedCount}).`);
+      }
+    }
   }
 
   const skinIds = new Set<string>();
@@ -292,7 +311,9 @@ export function validateDocument(value: unknown): ValidationResult {
         errors.push(`${path}.tracks must be an array.`);
         continue;
       }
-      for (const [trackIndex, track] of animation.tracks.entries()) validateAnimationTrack(track, `${path}.tracks[${trackIndex}]`, nodeIds, errors);
+      for (const [trackIndex, track] of animation.tracks.entries()) {
+        validateAnimationTrack(track, `${path}.tracks[${trackIndex}]`, nodesById, meshesById, v3, errors);
+      }
     }
   }
 
@@ -333,10 +354,58 @@ function validateSkinWeights(mesh: ThreeUnityMesh, boneCount: number, path: stri
   }
 }
 
-function validateAnimationTrack(track: ThreeUnityAnimationTrack, path: string, nodeIds: Set<string>, errors: string[]): void {
-  if (!nodeIds.has(track.targetNodeId)) errors.push(`${path} references missing target node '${track.targetNodeId}'.`);
-  const dimensions = track.property === "quaternion" ? 4 : track.property === "position" || track.property === "scale" ? 3 : 0;
-  if (dimensions === 0) errors.push(`${path}.property must be position, quaternion, or scale.`);
+function validateMorphTargets(mesh: ThreeUnityMesh, path: string, errors: string[]): void {
+  if (!Array.isArray(mesh.morphTargets)) {
+    errors.push(`${path}.morphTargets must be an array in version 3.`);
+    return;
+  }
+  const vertexCount = Array.isArray(mesh.positions) ? mesh.positions.length / 3 : Number.NaN;
+  const expectedDeltaCount = Number.isInteger(vertexCount) ? vertexCount * 3 : -1;
+  const names = new Set<string>();
+  for (const [targetIndex, target] of mesh.morphTargets.entries()) {
+    const targetPath = `${path}.morphTargets[${targetIndex}]`;
+    if (typeof target.name !== "string" || target.name.length === 0) errors.push(`${targetPath}.name is required.`);
+    else if (names.has(target.name)) errors.push(`${path} has duplicate morph target name '${target.name}'.`);
+    else names.add(target.name);
+    if (!isFiniteNumberArray(target.positionDeltas) || target.positionDeltas.length !== expectedDeltaCount) {
+      errors.push(`${targetPath}.positionDeltas must contain 3 finite values per vertex.`);
+    }
+    if (!isFiniteNumberArray(target.normalDeltas) || target.normalDeltas.length !== 0 && target.normalDeltas.length !== expectedDeltaCount) {
+      errors.push(`${targetPath}.normalDeltas must be empty or contain 3 finite values per vertex.`);
+    }
+  }
+}
+
+function validateAnimationTrack(
+  track: ThreeUnityAnimationTrack,
+  path: string,
+  nodesById: Map<string, ThreeUnityNode>,
+  meshesById: Map<string, ThreeUnityMesh>,
+  v3: boolean,
+  errors: string[],
+): void {
+  const targetNode = nodesById.get(track.targetNodeId);
+  if (!targetNode) errors.push(`${path} references missing target node '${track.targetNodeId}'.`);
+  const dimensions = track.property === "quaternion"
+    ? 4
+    : track.property === "position" || track.property === "scale"
+      ? 3
+      : v3 && track.property === "morphWeight"
+        ? 1
+        : 0;
+  if (dimensions === 0) errors.push(`${path}.property must be position, quaternion, scale${v3 ? ", or morphWeight" : ""}.`);
+  if (v3) {
+    if (!Number.isInteger(track.morphTargetIndex)) errors.push(`${path}.morphTargetIndex must be an integer.`);
+    else if (track.property === "morphWeight") {
+      const mesh = targetNode?.meshId ? meshesById.get(targetNode.meshId) : undefined;
+      if (!mesh) errors.push(`${path} morphWeight target node '${track.targetNodeId}' must reference a mesh.`);
+      else if (!Array.isArray(mesh.morphTargets) || track.morphTargetIndex < 0 || track.morphTargetIndex >= mesh.morphTargets.length) {
+        errors.push(`${path}.morphTargetIndex '${track.morphTargetIndex}' is out of range for mesh '${mesh.id}'.`);
+      }
+    } else if (track.morphTargetIndex !== -1) {
+      errors.push(`${path}.morphTargetIndex must be -1 for Transform tracks.`);
+    }
+  }
   const validTimes = isFiniteNumberArray(track.times) && track.times.length > 0;
   if (!validTimes) errors.push(`${path}.times must contain finite values.`);
   else {

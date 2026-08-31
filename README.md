@@ -12,7 +12,7 @@
 
 ## 当前可用闭环
 
-1. 在 Three.js 中构建静态场景或带 Skeleton/AnimationClip 的 `SkinnedMesh`。
+1. 在 Three.js 中构建静态场景、带 Skeleton/AnimationClip 的 `SkinnedMesh`，或带 morph target 动画的 Mesh。
 2. 调用 `exportThreeUnityJson(scene)` 生成一个 `.threeunity` JSON 资产。
 3. 在 Unity 项目中安装 `unity-package`。
 4. 把 `.threeunity` 放进 Unity 的 `Assets/`。
@@ -24,6 +24,7 @@
 npm install
 npm run example
 npm run example:animated
+npm run example:morph
 npm run example:components
 npx three-unity install-unity C:\Path\To\UnityProject
 npx three-unity copy .\examples\output\three-unity-demo.threeunity C:\Path\To\UnityProject
@@ -37,7 +38,7 @@ unity-package/package.json
 ```
 
 导入后，选中 `.threeunity` 可在 Inspector 中决定是否导入 Camera、Light、MeshCollider。
-也可以从 Unity Package Manager 的 **Samples** 导入 `Imported Triangle`、`Animated Skinned Mesh` 或 `Component Binding Door`。动画示例会直接循环播放真实蒙皮弯曲；门示例会把 descriptor 显式绑定为 sample 自己的 `Door` MonoBehaviour，并在 Play 后自动开门。
+也可以从 Unity Package Manager 的 **Samples** 导入 `Imported Triangle`、`Animated Skinned Mesh`、`Morph Target Animation` 或 `Component Binding Door`。两个动画示例会分别循环播放真实蒙皮弯曲和 BlendShape 变形；门示例会把 descriptor 显式绑定为 sample 自己的 `Door` MonoBehaviour，并在 Play 后自动开门。
 
 ## Three.js 代码接入
 
@@ -71,7 +72,20 @@ const json = await exportThreeUnityJson(scene, {
 });
 ```
 
-Unity importer 继续接受 v1 静态资产；v2 蒙皮节点生成 `SkinnedMeshRenderer`，动画作为 `AnimationClip` 子资产保存，并由根对象上的 `ThreeUnityAnimationPlayer` 默认播放。运行时也可调用 `player.Play("Walk")` 按名称切换已导入片段。
+Unity importer 继续接受 v1 静态资产和 v2 蒙皮/Transform 动画资产；v2 蒙皮节点生成 `SkinnedMeshRenderer`，动画作为 `AnimationClip` 子资产保存，并由根对象上的 `ThreeUnityAnimationPlayer` 默认播放。运行时也可调用 `player.Play("Walk")` 按名称切换已导入片段。
+
+### Morph Target / BlendShape 动画导出
+
+格式 v3 会把 `BufferGeometry.morphAttributes.position`（以及存在时的 normal）统一导出为相对基础网格的 delta，同时保留每个 Mesh 实例的 `morphTargetInfluences`。无论 Three.js 源 geometry 使用 absolute 还是 `morphTargetsRelative = true`，Unity 都会得到顺序和名称稳定的 BlendShape。morph-only Mesh 与 skin + morph Mesh 都使用 `SkinnedMeshRenderer`，初始 influence 和动画值在 Unity 中按百分比应用。
+
+`AnimationClip` 中的 `.morphTargetInfluences`、按 index 或按 name 的轨道会沿用固定采样流程烘焙成 `morphWeight` scalar 轨道；每条轨道用 node id 与 target index 关联，Unity 导入后绑定到真实的 `blendShape.<name>` 曲线。导出结束后调用方的 Transform 和全部 morph influence 都会恢复。
+
+```powershell
+npm run example:morph
+node .\dist\cli.js validate .\examples\output\morph-target-animation.threeunity
+```
+
+从 UPM 导入 `Morph Target Animation` Sample，把生成资产拖入 Scene 后进入 Play，即可看到 `Bulge` 与 `Twist` 组成的连续循环变形；不需要 Animator Controller 或额外 Sample 脚本。
 
 ## 数据驱动的可玩转换
 
@@ -205,7 +219,7 @@ public static class DoorBindings
 - `unitScaleMeters` 在 Unity 导入时应用于位置、相机裁剪面和灯光范围。
 - 支持普通 `BufferGeometry`，包括 position、normal、uv、vertex color、index、groups/submeshes。
 - 支持 `SkinnedMesh`、每顶点最多四个骨骼影响、骨骼层级与 inverse bind matrix；骨骼、skin 和动画目标均以 node id 关联，不依赖名称唯一。
-- 支持 `AnimationClip` 中节点或骨骼的 position、quaternion、scale 动画，并在 Unity 中生成可循环播放的 clip 子资产。
+- 支持 position/normal morph target、Mesh 实例初始 morph weight，以及 `AnimationClip` 中节点/骨骼的 position、quaternion、scale 和 morph influence 动画；Unity 会生成真实 BlendShape 与可循环播放的 clip 子资产。
 - 支持 MeshBasicMaterial、MeshStandardMaterial 的基础颜色、金属度、粗糙度、透明、双面、发光与常用纹理。
 - 支持 Perspective/Orthographic Camera，以及 Directional/Point/Spot/Ambient Light。
 - Built-in Render Pipeline 和 URP 会自动选取各自可用的 Lit/Unlit Shader。
@@ -215,7 +229,7 @@ public static class DoorBindings
 这是一个场景与资产桥，不是 JavaScript 到 C# 的通用编译器。当前不转换：
 
 - 任意 JavaScript 游戏逻辑、DOM/UI、WebXR 和自定义 GLSL Shader。
-- morph target / blend shape、材质动画、Humanoid Avatar、动作重定向、IK、root motion、动画混合树、粒子与后处理。
+- morph tangent、progressive multi-frame BlendShape、材质动画、Humanoid Avatar、动作重定向、IK、root motion、Animator Controller/动画混合树、粒子与后处理。
 - HDRP 专用 Shader 映射。
 - 外链纹理；纹理必须能在导出时读取并嵌入，跨域图片需配置 CORS。
 
@@ -232,8 +246,8 @@ Unity 运行时包还提供两类可选控制器：`ThreeUnityFirstPersonControl
 ```powershell
 npm run build
 npm test
-npm run example:animated
-node .\dist\cli.js validate .\examples\output\animated-skinned-mesh.threeunity
+npm run example:morph
+node .\dist\cli.js validate .\examples\output\morph-target-animation.threeunity
 ```
 
 默认 Node 套件只覆盖可复用 TypeScript 合同。修改 WebView Host 时再运行 `dotnet test .\webview-host-tests\ThreeUnityWebHost.Tests.csproj -c Release`；修改 UPM Runtime、Editor 或 importer 时运行 Unity EditMode 包测试。`Test-UnityLogicReconnect.ps1` 仅用于对应的 Web Bridge 生命周期故障模式，两个 transport benchmark 仅用于性能改动，不属于每次功能修改的默认回归。

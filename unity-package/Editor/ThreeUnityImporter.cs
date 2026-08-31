@@ -8,7 +8,7 @@ using UnityEngine.Rendering;
 
 namespace ThreeUnity.Bridge.Editor
 {
-    [ScriptedImporter(6, "threeunity")]
+    [ScriptedImporter(7, "threeunity")]
     public sealed class ThreeUnityImporter : ScriptedImporter
     {
         [SerializeField] private bool importCameras = true;
@@ -28,9 +28,9 @@ namespace ThreeUnity.Bridge.Editor
                 return;
             }
 
-            if (document == null || document.format != "three-unity-scene" || (document.version != 1 && document.version != 2))
+            if (document == null || document.format != "three-unity-scene" || (document.version != 1 && document.version != 2 && document.version != 3))
             {
-                context.LogImportError("Unsupported document. Expected three-unity-scene format version 1 or 2.");
+                context.LogImportError("Unsupported document. Expected three-unity-scene format version 1, 2, or 3.");
                 return;
             }
 
@@ -257,11 +257,40 @@ namespace ThreeUnity.Bridge.Editor
                     }
                 }
                 if (mesh.normals == null || mesh.normals.Length == 0) mesh.RecalculateNormals();
+                AddBlendShapes(mesh, record, vertexCount, unitScale);
                 mesh.RecalculateBounds();
                 context.AddObjectToAsset(record.id, mesh);
                 result[record.id] = mesh;
             }
             return result;
+        }
+
+        private static void AddBlendShapes(Mesh mesh, MeshRecord record, int vertexCount, float unitScale)
+        {
+            var targets = record.morphTargets ?? Array.Empty<MorphTargetRecord>();
+            var names = new HashSet<string>();
+            var meshName = string.IsNullOrEmpty(record.name) ? record.id : record.name;
+            foreach (var target in targets)
+            {
+                if (target == null || string.IsNullOrEmpty(target.name))
+                    throw new InvalidDataException($"Mesh '{meshName}' contains a morph target without a name.");
+                if (!names.Add(target.name))
+                    throw new InvalidDataException($"Mesh '{meshName}' contains duplicate morph target name '{target.name}'.");
+
+                var positionDeltas = target.positionDeltas ?? Array.Empty<float>();
+                if (positionDeltas.Length != vertexCount * 3)
+                    throw new InvalidDataException($"Mesh '{meshName}' morph target '{target.name}' has {positionDeltas.Length} position delta values for {vertexCount} vertices.");
+                var normalDeltas = target.normalDeltas ?? Array.Empty<float>();
+                if (normalDeltas.Length != 0 && normalDeltas.Length != vertexCount * 3)
+                    throw new InvalidDataException($"Mesh '{meshName}' morph target '{target.name}' has {normalDeltas.Length} normal delta values for {vertexCount} vertices.");
+
+                mesh.AddBlendShapeFrame(
+                    target.name,
+                    100f,
+                    ReadVectors3(positionDeltas, true, unitScale),
+                    normalDeltas.Length == 0 ? null : ReadVectors3(normalDeltas, true, 1f),
+                    null);
+            }
         }
 
         private void AttachMesh(
@@ -281,11 +310,20 @@ namespace ThreeUnity.Bridge.Editor
             {
                 foreach (var candidate in meshRecords) if (candidate.id == node.meshId) { record = candidate; break; }
             }
+            var morphWeights = node.morphWeights ?? Array.Empty<float>();
+            if (morphWeights.Length != mesh.blendShapeCount)
+                throw new InvalidDataException($"Node '{node.id}' provides {morphWeights.Length} morph weights for mesh '{node.meshId}' with {mesh.blendShapeCount} morph targets.");
 
             if (!string.IsNullOrEmpty(node.skinId))
             {
                 if (!skins.TryGetValue(node.skinId, out var skin)) throw new InvalidDataException($"Node '{node.id}' references missing skin '{node.skinId}'.");
                 AttachSkinnedMesh(context, gameObject, node, mesh, record, skin, materials, objects, unitScale);
+                return;
+            }
+
+            if (mesh.blendShapeCount > 0)
+            {
+                AttachMorphMesh(gameObject, node, mesh, record, materials);
                 return;
             }
 
@@ -342,6 +380,28 @@ namespace ThreeUnity.Bridge.Editor
             renderer.rootBone = rootBoneObject.transform;
             renderer.localBounds = mesh.bounds;
             AssignMaterials(renderer, meshRecord, materials);
+            ApplyMorphWeights(renderer, node);
+        }
+
+        private static void AttachMorphMesh(
+            GameObject gameObject,
+            NodeRecord node,
+            Mesh mesh,
+            MeshRecord meshRecord,
+            Dictionary<string, Material> materials)
+        {
+            var renderer = gameObject.AddComponent<SkinnedMeshRenderer>();
+            renderer.sharedMesh = mesh;
+            renderer.localBounds = mesh.bounds;
+            AssignMaterials(renderer, meshRecord, materials);
+            ApplyMorphWeights(renderer, node);
+        }
+
+        private static void ApplyMorphWeights(SkinnedMeshRenderer renderer, NodeRecord node)
+        {
+            var weights = node.morphWeights ?? Array.Empty<float>();
+            for (var index = 0; index < weights.Length; index++)
+                renderer.SetBlendShapeWeight(index, weights[index] * 100f);
         }
 
         private static void AssignMaterials(Renderer renderer, MeshRecord record, Dictionary<string, Material> materials)
@@ -389,7 +449,10 @@ namespace ThreeUnity.Bridge.Editor
                     if (!objects.TryGetValue(track.targetNodeId, out var target))
                         throw new InvalidDataException($"Animation '{record.id}' references missing target node '{track.targetNodeId}'.");
                     var path = AnimationUtility.CalculateTransformPath(target.transform, root.transform);
-                    AttachAnimationTrack(clip, path, track, record.duration, record.loop, unitScale);
+                    if (track.property == "morphWeight")
+                        AttachMorphAnimationTrack(clip, path, target, track, record);
+                    else
+                        AttachAnimationTrack(clip, path, track, record.duration, record.loop, unitScale);
                 }
                 clip.EnsureQuaternionContinuity();
                 context.AddObjectToAsset(record.id, clip);
@@ -463,6 +526,45 @@ namespace ThreeUnity.Bridge.Editor
             }
         }
 
+        private static void AttachMorphAnimationTrack(
+            AnimationClip clip,
+            string path,
+            GameObject target,
+            AnimationTrackRecord track,
+            AnimationRecord animation)
+        {
+            if (track.interpolation != "linear")
+                throw new InvalidDataException($"Animation '{animation.id}' morph track for node '{track.targetNodeId}' uses unsupported interpolation '{track.interpolation}'.");
+
+            var renderer = target.GetComponent<SkinnedMeshRenderer>();
+            if (renderer == null || renderer.sharedMesh == null)
+                throw new InvalidDataException($"Animation '{animation.id}' morph track targets node '{track.targetNodeId}' without a SkinnedMeshRenderer.");
+            if (track.morphTargetIndex < 0 || track.morphTargetIndex >= renderer.sharedMesh.blendShapeCount)
+                throw new InvalidDataException($"Animation '{animation.id}' morph track targets index {track.morphTargetIndex} on node '{track.targetNodeId}', which has {renderer.sharedMesh.blendShapeCount} morph targets.");
+
+            var times = track.times ?? Array.Empty<float>();
+            var values = track.values ?? Array.Empty<float>();
+            if (values.Length != times.Length)
+                throw new InvalidDataException($"Animation '{animation.id}' morph track for node '{track.targetNodeId}' has {values.Length} values for {times.Length} keys.");
+
+            var curve = new AnimationCurve();
+            for (var keyIndex = 0; keyIndex < times.Length; keyIndex++)
+                curve.AddKey(times[keyIndex], values[keyIndex] * 100f);
+            if (times.Length > 0 && times[times.Length - 1] < animation.duration)
+                curve.AddKey(animation.duration, curve.keys[curve.length - 1].value);
+            curve.preWrapMode = animation.loop ? WrapMode.Loop : WrapMode.Once;
+            curve.postWrapMode = animation.loop ? WrapMode.Loop : WrapMode.Once;
+            for (var index = 0; index < curve.length; index++)
+            {
+                AnimationUtility.SetKeyLeftTangentMode(curve, index, AnimationUtility.TangentMode.Linear);
+                AnimationUtility.SetKeyRightTangentMode(curve, index, AnimationUtility.TangentMode.Linear);
+            }
+
+            var targetName = renderer.sharedMesh.GetBlendShapeName(track.morphTargetIndex);
+            var binding = EditorCurveBinding.FloatCurve(path, typeof(SkinnedMeshRenderer), $"blendShape.{targetName}");
+            AnimationUtility.SetEditorCurve(clip, binding, curve);
+        }
+
         private static void AttachAnimationPlayer(
             GameObject root,
             Dictionary<string, AnimationClip> clipsById,
@@ -493,7 +595,7 @@ namespace ThreeUnity.Bridge.Editor
         {
             var renderers = root.GetComponentsInChildren<SkinnedMeshRenderer>(true);
             var clipList = new List<AnimationClip>(clips);
-            if (renderers.Length == 0 || clipList.Count == 0) return;
+            if (renderers.Length == 0) return;
 
             var transforms = root.GetComponentsInChildren<Transform>(true);
             var positions = new Vector3[transforms.Length];
@@ -505,16 +607,24 @@ namespace ThreeUnity.Bridge.Editor
                 rotations[index] = transforms[index].localRotation;
                 scales[index] = transforms[index].localScale;
             }
+            var blendShapeWeights = CaptureBlendShapeWeights(renderers);
 
             var bakedMesh = new Mesh { name = "ThreeUnity Animated Bounds Probe" };
             try
             {
                 foreach (var renderer in renderers)
                 {
+                    RestoreLocalTransforms(transforms, positions, rotations, scales);
+                    RestoreBlendShapeWeights(renderers, blendShapeWeights);
                     var animatedBounds = renderer.sharedMesh.bounds;
+                    bakedMesh.Clear();
+                    renderer.BakeMesh(bakedMesh);
+                    animatedBounds.Encapsulate(bakedMesh.bounds.min);
+                    animatedBounds.Encapsulate(bakedMesh.bounds.max);
                     foreach (var clip in clipList)
                     {
                         RestoreLocalTransforms(transforms, positions, rotations, scales);
+                        RestoreBlendShapeWeights(renderers, blendShapeWeights);
                         foreach (var sampleTime in CollectAnimationSampleTimes(clip))
                         {
                             clip.SampleAnimation(root, sampleTime);
@@ -532,8 +642,29 @@ namespace ThreeUnity.Bridge.Editor
             finally
             {
                 RestoreLocalTransforms(transforms, positions, rotations, scales);
+                RestoreBlendShapeWeights(renderers, blendShapeWeights);
                 UnityEngine.Object.DestroyImmediate(bakedMesh);
             }
+        }
+
+        private static float[][] CaptureBlendShapeWeights(SkinnedMeshRenderer[] renderers)
+        {
+            var weights = new float[renderers.Length][];
+            for (var rendererIndex = 0; rendererIndex < renderers.Length; rendererIndex++)
+            {
+                var renderer = renderers[rendererIndex];
+                weights[rendererIndex] = new float[renderer.sharedMesh.blendShapeCount];
+                for (var blendShapeIndex = 0; blendShapeIndex < weights[rendererIndex].Length; blendShapeIndex++)
+                    weights[rendererIndex][blendShapeIndex] = renderer.GetBlendShapeWeight(blendShapeIndex);
+            }
+            return weights;
+        }
+
+        private static void RestoreBlendShapeWeights(SkinnedMeshRenderer[] renderers, float[][] weights)
+        {
+            for (var rendererIndex = 0; rendererIndex < renderers.Length; rendererIndex++)
+            for (var blendShapeIndex = 0; blendShapeIndex < weights[rendererIndex].Length; blendShapeIndex++)
+                renderers[rendererIndex].SetBlendShapeWeight(blendShapeIndex, weights[rendererIndex][blendShapeIndex]);
         }
 
         private static SortedSet<float> CollectAnimationSampleTimes(AnimationClip clip)
@@ -767,6 +898,7 @@ namespace ThreeUnity.Bridge.Editor
             public int layersMask = 1;
             public string meshId;
             public string skinId;
+            public float[] morphWeights;
             public CameraRecord camera;
             public LightRecord light;
             public string metadataJson;
@@ -776,11 +908,12 @@ namespace ThreeUnity.Bridge.Editor
         [Serializable] private sealed class CameraRecord { public string type; public float fov; public float near; public float far; public float top; public float bottom; }
         [Serializable] private sealed class LightRecord { public string type; public float[] color; public float intensity; public float range; public float spotAngleRadians; public float penumbra; public bool castShadow; }
         [Serializable] private sealed class ComponentRecord { public string type; public string dataJson; }
-        [Serializable] private sealed class MeshRecord { public string id; public string name; public float[] positions; public float[] normals; public float[] uv0; public float[] colors; public int[] indices; public MeshGroupRecord[] groups; public string[] materialIds; public int[] skinIndices; public float[] skinWeights; }
+        [Serializable] private sealed class MeshRecord { public string id; public string name; public float[] positions; public float[] normals; public float[] uv0; public float[] colors; public int[] indices; public MeshGroupRecord[] groups; public string[] materialIds; public int[] skinIndices; public float[] skinWeights; public MorphTargetRecord[] morphTargets; }
+        [Serializable] private sealed class MorphTargetRecord { public string name; public float[] positionDeltas; public float[] normalDeltas; }
         [Serializable] private sealed class MeshGroupRecord { public int start; public int count; public int materialIndex; }
         [Serializable] private sealed class SkinRecord { public string id; public string name; public string meshNodeId; public string[] boneNodeIds; public string rootBoneNodeId; public float[] inverseBindMatrices; public float[] bindMatrix; }
         [Serializable] private sealed class AnimationRecord { public string id; public string name; public float duration; public bool loop; public AnimationTrackRecord[] tracks; }
-        [Serializable] private sealed class AnimationTrackRecord { public string targetNodeId; public string property; public float[] times; public float[] values; public string interpolation; public bool baked; }
+        [Serializable] private sealed class AnimationTrackRecord { public string targetNodeId; public string property; public int morphTargetIndex = -1; public float[] times; public float[] values; public string interpolation; public bool baked; }
         [Serializable] private sealed class MaterialRecord
         {
             public string id; public string name; public float[] baseColor; public float[] emissive; public float metallic; public float roughness = 0.5f; public bool transparent; public bool doubleSided; public float alphaCutoff; public bool unlit; public bool vertexColors;

@@ -24,6 +24,7 @@ import {
   Uint16BufferAttribute,
   UnsignedByteType,
   Vector3,
+  VectorKeyframeTrack,
 } from "three";
 import { exportThreeUnity, validateDocument } from "../src/index.js";
 
@@ -126,9 +127,16 @@ test("exports reusable playable runtime configuration", async () => {
   assert.equal(document.runtime.hotbar[0].name, "Grass");
 });
 
-test("accepts pre-runtime format-v1 documents with Unity's safe defaults", async () => {
+test("accepts pre-runtime format-v1 and pre-morph format-v2 documents", async () => {
   const scene = new Scene();
-  const legacyDocument = await exportThreeUnity(scene) as unknown as Record<string, unknown>;
+  const currentDocument = await exportThreeUnity(scene);
+  const version2Document = structuredClone(currentDocument) as unknown as Record<string, unknown>;
+  version2Document.version = 2;
+  for (const node of version2Document.nodes as Array<Record<string, unknown>>) delete node.morphWeights;
+  for (const mesh of version2Document.meshes as Array<Record<string, unknown>>) delete mesh.morphTargets;
+  assert.deepEqual(validateDocument(version2Document), { valid: true, errors: [] });
+
+  const legacyDocument = structuredClone(currentDocument) as unknown as Record<string, unknown>;
   legacyDocument.version = 1;
   delete legacyDocument.runtime;
   delete legacyDocument.skins;
@@ -195,7 +203,7 @@ test("exports a two-bone SkinnedMesh and baked AnimationClip with stable node re
   });
 
   assert.deepEqual(validateDocument(document), { valid: true, errors: [] });
-  assert.equal(document.version, 2);
+  assert.equal(document.version, 3);
   assert.equal(document.skins.length, 1);
   assert.equal(document.animations.length, 1);
   assert.equal(document.autoplayAnimation, true);
@@ -217,6 +225,7 @@ test("exports a two-bone SkinnedMesh and baked AnimationClip with stable node re
   assert.ok(tipNode);
   const quaternionTrack = document.animations[0].tracks.find((track) => track.targetNodeId === tipNode.id && track.property === "quaternion");
   assert.ok(quaternionTrack);
+  assert.equal(quaternionTrack.morphTargetIndex, -1);
   assert.equal(quaternionTrack.times.at(-1), 1);
   assert.equal(quaternionTrack.values.length, quaternionTrack.times.length * 4);
 
@@ -226,6 +235,136 @@ test("exports a two-bone SkinnedMesh and baked AnimationClip with stable node re
   const missingMeshValidation = validateDocument(document);
   assert.equal(missingMeshValidation.valid, false);
   assert.match(missingMeshValidation.errors.join("\n"), /must reference a mesh/);
+});
+
+test("exports absolute and relative morph targets, initial weights, and baked morph animation without mutating the source", async () => {
+  const scene = new Scene();
+  const material = new MeshStandardMaterial();
+
+  const absoluteGeometry = new BufferGeometry();
+  const absolutePositions = new Float32BufferAttribute([
+    0, 0, 0,
+    1, 0, 0,
+    0, 1, 0,
+  ], 3);
+  const absoluteNormals = new Float32BufferAttribute([
+    0, 0, 1,
+    0, 0, 1,
+    0, 0, 1,
+  ], 3);
+  absoluteGeometry.setAttribute("position", absolutePositions);
+  absoluteGeometry.setAttribute("normal", absoluteNormals);
+  const bulgePositions = new Float32BufferAttribute([
+    0, 0, 0.5,
+    1, 0, 0.25,
+    0, 1, 0.5,
+  ], 3);
+  bulgePositions.name = "Attribute Bulge";
+  const twistPositions = new Float32BufferAttribute([
+    -0.25, 0, 0,
+    1, 0.2, 0,
+    0.15, 1, 0,
+  ], 3);
+  twistPositions.name = "Attribute Twist";
+  const bulgeNormals = new Float32BufferAttribute([
+    0, 0, 1,
+    0, 0, 1,
+    0, 0, 1,
+  ], 3);
+  const twistNormals = new Float32BufferAttribute([
+    0.2, 0, 0.8,
+    0, 0.2, 0.8,
+    -0.2, 0, 0.8,
+  ], 3);
+  absoluteGeometry.morphAttributes.position = [bulgePositions, twistPositions];
+  absoluteGeometry.morphAttributes.normal = [bulgeNormals, twistNormals];
+  absoluteGeometry.morphTargetsRelative = false;
+
+  const absoluteMesh = new Mesh(absoluteGeometry, material);
+  absoluteMesh.name = "Absolute Morph Mesh";
+  absoluteMesh.position.set(2, 3, 4);
+  absoluteMesh.morphTargetDictionary = { Bulge: 0, Twist: 1 };
+  absoluteMesh.morphTargetInfluences = [0.25, 0];
+  scene.add(absoluteMesh);
+
+  const relativeGeometry = new BufferGeometry();
+  relativeGeometry.setAttribute("position", new Float32BufferAttribute([
+    0, 0, 0,
+    1, 0, 0,
+    0, 1, 0,
+  ], 3));
+  relativeGeometry.setAttribute("normal", new Float32BufferAttribute([
+    0, 0, 1,
+    0, 0, 1,
+    0, 0, 1,
+  ], 3));
+  const relativePositions = new Float32BufferAttribute([
+    0, 0, 0.2,
+    0, 0, 0.3,
+    0, 0, 0.4,
+  ], 3);
+  relativePositions.name = "Relative Lift";
+  const relativeNormals = new Float32BufferAttribute([
+    0.1, 0, 0,
+    0.1, 0, 0,
+    0.1, 0, 0,
+  ], 3);
+  relativeGeometry.morphAttributes.position = [relativePositions];
+  relativeGeometry.morphAttributes.normal = [relativeNormals];
+  relativeGeometry.morphTargetsRelative = true;
+  const relativeMesh = new Mesh(relativeGeometry, material);
+  relativeMesh.name = "Relative Morph Mesh";
+  scene.add(relativeMesh);
+
+  const clip = new AnimationClip("Morph Cycle", 1, [
+    new VectorKeyframeTrack(`${absoluteMesh.uuid}.morphTargetInfluences`, [0, 0.5, 1], [
+      0.25, 0,
+      0.75, 1,
+      0.25, 0,
+    ]),
+  ]);
+  scene.animations.push(clip);
+
+  const originalInfluenceReference = absoluteMesh.morphTargetInfluences;
+  const originalInfluences = [...absoluteMesh.morphTargetInfluences];
+  const originalPosition = absoluteMesh.position.toArray();
+  const originalQuaternion = absoluteMesh.quaternion.toArray();
+  const originalScale = absoluteMesh.scale.toArray();
+  const document = await exportThreeUnity(scene, { animationSampleRate: 4 });
+
+  assert.deepEqual(validateDocument(document), { valid: true, errors: [] });
+  assert.equal(document.version, 3);
+  assert.strictEqual(absoluteMesh.morphTargetInfluences, originalInfluenceReference);
+  assert.deepEqual(absoluteMesh.morphTargetInfluences, originalInfluences);
+  assert.deepEqual(absoluteMesh.position.toArray(), originalPosition);
+  assert.deepEqual(absoluteMesh.quaternion.toArray(), originalQuaternion);
+  assert.deepEqual(absoluteMesh.scale.toArray(), originalScale);
+
+  const absoluteNode = document.nodes.find((node) => node.name === absoluteMesh.name);
+  assert.ok(absoluteNode);
+  assert.deepEqual(absoluteNode.morphWeights, [0.25, 0]);
+  const exportedAbsoluteMesh = document.meshes.find((mesh) => mesh.id === absoluteNode.meshId);
+  assert.ok(exportedAbsoluteMesh);
+  assert.deepEqual(exportedAbsoluteMesh.morphTargets.map((target) => target.name), ["Bulge", "Twist"]);
+  assert.ok(Math.abs(exportedAbsoluteMesh.morphTargets[0].positionDeltas[2] - 0.5) < 1e-6);
+  assert.ok(Math.abs(exportedAbsoluteMesh.morphTargets[1].positionDeltas[0] - -0.25) < 1e-6);
+  assert.ok(Math.abs(exportedAbsoluteMesh.morphTargets[1].normalDeltas[0] - 0.2) < 1e-6);
+  assert.ok(Math.abs(exportedAbsoluteMesh.morphTargets[1].normalDeltas[2] - -0.2) < 1e-6);
+
+  const relativeNode = document.nodes.find((node) => node.name === relativeMesh.name);
+  assert.ok(relativeNode);
+  assert.deepEqual(relativeNode.morphWeights, [0]);
+  const exportedRelativeMesh = document.meshes.find((mesh) => mesh.id === relativeNode.meshId);
+  assert.ok(exportedRelativeMesh);
+  assert.deepEqual(exportedRelativeMesh.morphTargets[0].positionDeltas.slice(0, 3), [0, 0, relativePositions.getZ(0)]);
+  assert.ok(Math.abs(exportedRelativeMesh.morphTargets[0].normalDeltas[0] - 0.1) < 1e-6);
+
+  const morphTracks = document.animations[0].tracks.filter((track) => track.property === "morphWeight");
+  assert.equal(morphTracks.length, 2);
+  assert.deepEqual(morphTracks.map((track) => track.morphTargetIndex), [0, 1]);
+  assert.deepEqual(morphTracks[0].times, [0, 0.25, 0.5, 0.75, 1]);
+  assert.deepEqual(morphTracks[0].values, [0.25, 0.5, 0.75, 0.5, 0.25]);
+  assert.deepEqual(morphTracks[1].values, [0, 0.5, 1, 0.5, 0]);
 });
 
 test("omits invisible subtrees by default", async () => {

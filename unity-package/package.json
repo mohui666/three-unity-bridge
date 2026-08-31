@@ -28,6 +28,11 @@
       "displayName": "Component Binding Door",
       "description": "Binds a Door descriptor to a sample MonoBehaviour that opens automatically from descriptor data.",
       "path": "Samples~/Component Binding Door"
+    },
+    {
+      "displayName": "Morph Target Animation",
+      "description": "Imports two morph targets as Unity BlendShapes and plays a looping morph-weight animation.",
+      "path": "Samples~/Morph Target Animation"
     }
   ]
 }

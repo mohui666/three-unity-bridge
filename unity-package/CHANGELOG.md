@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added `.threeunity` format v3 morph targets, initial morph weights, and morph-weight animation curves as Unity BlendShapes on `SkinnedMeshRenderer`.
+- Animated bounds now include BlendShape deformation while restoring initial weights after sampling.
+- Added a self-contained Morph Target Animation sample and one focused importer deformation smoke test.
 - Added explicit `ThreeUnityComponentBindings` registration and the hierarchy-scoped `ThreeUnityComponentApplicator`, allowing existing `type + dataJson` descriptors to configure project-owned components without reflection or import-time execution.
 - The importer now adds the runtime applicator only to assets that contain component descriptors, and the new Component Binding Door sample demonstrates visible descriptor-driven behavior.
 - Added `.threeunity` format v2 for `SkinnedMesh`, stable node-id bone references, four-weight skinning, bind poses, and baked transform animation tracks.

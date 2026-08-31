@@ -30,6 +30,7 @@ import {
   ThreeUnityLight,
   ThreeUnityMaterial,
   ThreeUnityMesh,
+  ThreeUnityMorphTarget,
   ThreeUnityNode,
   ThreeUnityRuntime,
   ThreeUnitySkin,
@@ -51,7 +52,7 @@ export interface ThreeUnityExportOptions {
   defaultAnimation?: string | AnimationClip;
   autoplayAnimation?: boolean;
   animationLoop?: boolean;
-  /** Fixed sampling rate used to bake Three.js animation into local transform tracks. */
+  /** Fixed sampling rate used to bake Three.js animation into local transform and morph-weight tracks. */
   animationSampleRate?: number;
 }
 
@@ -74,6 +75,8 @@ export async function exportThreeUnity(
   const warnings: string[] = [];
   const warnedRenderableTypes = new Set<string>();
   const meshIds = new Map<string, string>();
+  const morphTargetNamesByMeshId = new Map<string, string[]>();
+  const morphTargetNamesByObject = new Map<Object3D, string[]>();
   const skinIds = new Map<SkinnedMesh, string>();
   const materialIds = new Map<Material, string>();
   const textureIds = new Map<Texture, string>();
@@ -133,19 +136,23 @@ export async function exportThreeUnity(
     const meshMaterials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
     const skinnedMesh = mesh as SkinnedMesh;
     const isSkinnedMesh = Boolean(skinnedMesh.isSkinnedMesh);
+    const position = requiredAttribute(geometry, "position");
+    const positionMorphAttributes = readMorphAttributes(mesh, "position");
+    const normalMorphAttributes = readMorphAttributes(mesh, "normal");
+    const morphTargetNames = createMorphTargetNames(mesh, positionMorphAttributes, normalMorphAttributes);
     // Unity's imported subasset owns its material slots, so meshes that share
-    // geometry but override materials must remain separate bridge records.
-    const meshKey = `${geometry.uuid}|${meshMaterials.map((material) => material.uuid).join("|")}|${isSkinnedMesh ? "skinned" : "static"}`;
+    // geometry but override materials or morph names must remain separate bridge records.
+    const morphNameKey = morphTargetNames.length > 0 ? `|morph:${morphTargetNames.map(encodeURIComponent).join(",")}` : "";
+    const meshKey = `${geometry.uuid}|${meshMaterials.map((material) => material.uuid).join("|")}|${isSkinnedMesh ? "skinned" : "static"}${morphNameKey}`;
     const existing = meshIds.get(meshKey);
     if (existing) return existing;
     const id = stableId("mesh", meshKey.replaceAll("|", "_"), meshIds.size);
     meshIds.set(meshKey, id);
     const materialIdList = await Promise.all(meshMaterials.map(registerMaterial));
-    const position = requiredAttribute(geometry, "position");
     const normal = geometry.getAttribute("normal") as BufferAttribute | undefined;
     const uv = geometry.getAttribute("uv") as BufferAttribute | undefined;
     const color = geometry.getAttribute("color") as BufferAttribute | undefined;
-    if (geometry.morphAttributes.position?.length) warnings.push(`${mesh.name || mesh.uuid}: morph targets are not exported in format v2.`);
+    const morphTargets = exportMorphTargets(mesh, position, normal, positionMorphAttributes, normalMorphAttributes, morphTargetNames);
     const skinAttributes = isSkinnedMesh ? normalizeSkinAttributes(skinnedMesh, position) : { skinIndices: [], skinWeights: [] };
     meshes.push({
       id,
@@ -158,7 +165,9 @@ export async function exportThreeUnity(
       groups: geometry.groups.map((group) => ({ start: group.start, count: group.count, materialIndex: group.materialIndex ?? 0 })),
       materialIds: materialIdList,
       ...skinAttributes,
+      morphTargets,
     });
+    morphTargetNamesByMeshId.set(id, morphTargetNames);
     return id;
   };
 
@@ -209,24 +218,28 @@ export async function exportThreeUnity(
       layersMask: object.layers.mask,
       meshId: "",
       skinId: "",
+      morphWeights: [],
       metadataJson: safeJson(metadata),
       components,
     };
     const isInstancedMesh = Boolean((object as Mesh & { isInstancedMesh?: boolean }).isInstancedMesh);
     if ((object as Mesh).isMesh && !isInstancedMesh) {
       node.meshId = await registerMesh(object as Mesh);
+      const morphTargetNames = morphTargetNamesByMeshId.get(node.meshId) ?? [];
+      node.morphWeights = readMorphWeights(object as Mesh, morphTargetNames);
+      if (morphTargetNames.length > 0) morphTargetNamesByObject.set(object, morphTargetNames);
       if ((object as SkinnedMesh).isSkinnedMesh) node.skinId = registerSkin(object as SkinnedMesh, id);
     }
     if (!(object as Mesh).isMesh && isUnsupportedRenderable(object)) {
       if (!warnedRenderableTypes.has(object.type)) {
-        warnings.push(`${object.type} renderables are preserved as transforms only in format v2.`);
+        warnings.push(`${object.type} renderables are preserved as transforms only in format v3.`);
         warnedRenderableTypes.add(object.type);
       }
     }
     if ((object as Camera).isCamera) node.camera = exportCamera(object as Camera);
     if ((object as Object3D & { isLight?: boolean }).isLight) node.light = exportLight(object as Object3D & LightLike);
     nodes.push(node);
-    if (isInstancedMesh) await exportInstances(object as Mesh & InstancedMeshLike, id, registerMesh, nodes, warnings);
+    if (isInstancedMesh) await exportInstances(object as Mesh & InstancedMeshLike, id, registerMesh, morphTargetNamesByMeshId, nodes, warnings);
     for (const child of object.children) await visit(child, id, requiredBones.has(child));
   };
 
@@ -240,7 +253,15 @@ export async function exportThreeUnity(
     const parentId = detachedRoot.parent && visitedObjects.has(detachedRoot.parent) ? nodeIdFor(detachedRoot.parent) : "";
     await visit(detachedRoot, parentId, true);
   }
-  const animationResult = exportAnimations(root, options.animations ?? root.animations, options, visitedObjects, nodeIdFor, warnings);
+  const animationResult = exportAnimations(
+    root,
+    options.animations ?? root.animations,
+    options,
+    visitedObjects,
+    morphTargetNamesByObject,
+    nodeIdFor,
+    warnings,
+  );
   return {
     format: THREE_UNITY_FORMAT,
     version: THREE_UNITY_VERSION,
@@ -273,11 +294,20 @@ interface SampledTransform {
   scale: number[];
 }
 
+type ThreeUnityTransformAnimationProperty = Exclude<ThreeUnityAnimationProperty, "morphWeight">;
+
+interface SavedMorphWeights {
+  reference: number[] | undefined;
+  values: number[];
+  initialTargetValues: number[];
+}
+
 function exportAnimations(
   root: Object3D,
   clips: AnimationClip[],
   options: ThreeUnityExportOptions,
   visitedObjects: Set<Object3D>,
+  morphTargetNamesByObject: Map<Object3D, string[]>,
   nodeIdFor: (object: Object3D) => string,
   warnings: string[],
 ): { animations: ThreeUnityAnimation[]; defaultAnimationId: string; autoplayAnimation: boolean } {
@@ -294,7 +324,8 @@ function exportAnimations(
       continue;
     }
     if (clip.tracks.length === 0) warnings.push(`${clip.name || clip.uuid}: empty animation clip has no tracks.`);
-    const properties = new Set<ThreeUnityAnimationProperty>();
+    const properties = new Set<ThreeUnityTransformAnimationProperty>();
+    let samplesMorphWeights = false;
     const supportedTracks = clip.tracks.filter((track) => {
       let parsed: ReturnType<typeof PropertyBinding.parseTrackName>;
       try {
@@ -303,12 +334,14 @@ function exportAnimations(
         warnings.push(`${clip.name || clip.uuid}: track '${track.name}' could not be parsed (${error instanceof Error ? error.message : String(error)}).`);
         return false;
       }
-      if (!isAnimationProperty(parsed.propertyName)) {
+      const transformProperty = isTransformAnimationProperty(parsed.propertyName) ? parsed.propertyName : undefined;
+      const morphProperty = parsed.objectName === undefined && parsed.propertyName === "morphTargetInfluences";
+      if (!transformProperty && !morphProperty) {
         warnings.push(`${clip.name || clip.uuid}: track '${track.name}' targets unsupported property '${parsed.propertyName}'.`);
         return false;
       }
-      if (parsed.nodeName) {
-        const target = PropertyBinding.findNode(root, parsed.nodeName);
+      const target = PropertyBinding.findNode(root, parsed.nodeName);
+      if (parsed.nodeName || morphProperty) {
         if (!target) {
           warnings.push(`${clip.name || clip.uuid}: track '${track.name}' does not resolve to a node under the exported root.`);
           return false;
@@ -318,13 +351,31 @@ function exportAnimations(
           return false;
         }
       }
-      properties.add(parsed.propertyName);
+      if (morphProperty) {
+        if (!target || !morphTargetNamesByObject.has(target as Object3D)) {
+          warnings.push(`${clip.name || clip.uuid}: track '${track.name}' does not resolve to an exported Mesh with position morph targets.`);
+          return false;
+        }
+        samplesMorphWeights = true;
+      } else if (transformProperty) {
+        properties.add(transformProperty);
+      }
       return true;
     });
     const id = stableId("animation", clip.uuid, clipIndex);
-    const tracks = bakeAnimationClip(root, clip, supportedTracks, properties, sampleRate, exportedObjects, nodeIdFor);
+    const tracks = bakeAnimationClip(
+      root,
+      clip,
+      supportedTracks,
+      properties,
+      samplesMorphWeights,
+      sampleRate,
+      exportedObjects,
+      morphTargetNamesByObject,
+      nodeIdFor,
+    );
     if (supportedTracks.length > 0 && tracks.length === 0) {
-      warnings.push(`${clip.name || clip.uuid}: supported tracks produced no exported transform changes.`);
+      warnings.push(`${clip.name || clip.uuid}: supported tracks produced no exported transform or morph-weight changes.`);
     }
     animations.push({
       id,
@@ -359,14 +410,18 @@ function bakeAnimationClip(
   root: Object3D,
   clip: AnimationClip,
   sourceTracks: AnimationClip["tracks"],
-  properties: Set<ThreeUnityAnimationProperty>,
+  properties: Set<ThreeUnityTransformAnimationProperty>,
+  samplesMorphWeights: boolean,
   sampleRate: number,
   objects: Object3D[],
+  morphTargetNamesByObject: Map<Object3D, string[]>,
   nodeIdFor: (object: Object3D) => string,
 ): ThreeUnityAnimationTrack[] {
   if (sourceTracks.length === 0) return [];
   const saved = new Map<Object3D, SavedTransform>();
   const sampled = new Map<Object3D, SampledTransform>();
+  const savedMorphWeights = new Map<Mesh, SavedMorphWeights>();
+  const sampledMorphWeights = new Map<Mesh, number[][]>();
   for (const object of objects) {
     saved.set(object, {
       position: [object.position.x, object.position.y, object.position.z],
@@ -374,6 +429,16 @@ function bakeAnimationClip(
       scale: [object.scale.x, object.scale.y, object.scale.z],
     });
     sampled.set(object, { position: [], quaternion: [], scale: [] });
+  }
+  if (samplesMorphWeights) {
+    for (const [object, targetNames] of morphTargetNamesByObject) {
+      const mesh = object as Mesh;
+      const reference = mesh.morphTargetInfluences;
+      const values = reference ? [...reference] : [];
+      const initialTargetValues = targetNames.map((targetName, targetIndex) => readMorphInfluence(mesh, targetIndex, targetName, clip, true));
+      savedMorphWeights.set(mesh, { reference, values, initialTargetValues });
+      sampledMorphWeights.set(mesh, targetNames.map(() => []));
+    }
   }
 
   const times = createAnimationSampleTimes(clip.duration, sampleRate);
@@ -392,6 +457,15 @@ function bakeAnimationClip(
         if (properties.has("quaternion")) appendContinuousQuaternion(values.quaternion, object.quaternion, saved.get(object)!.quaternion);
         if (properties.has("scale")) values.scale.push(object.scale.x, object.scale.y, object.scale.z);
       }
+      if (samplesMorphWeights) {
+        for (const [object, targetNames] of morphTargetNamesByObject) {
+          const mesh = object as Mesh;
+          const targetValues = sampledMorphWeights.get(mesh)!;
+          for (let targetIndex = 0; targetIndex < targetNames.length; targetIndex += 1) {
+            targetValues[targetIndex].push(readMorphInfluence(mesh, targetIndex, targetNames[targetIndex], clip, false));
+          }
+        }
+      }
     }
   } finally {
     mixer.stopAllAction();
@@ -401,6 +475,15 @@ function bakeAnimationClip(
       object.position.fromArray(transform.position);
       object.quaternion.fromArray(transform.quaternion);
       object.scale.fromArray(transform.scale);
+    }
+    for (const [mesh, morphWeights] of savedMorphWeights) {
+      if (!morphWeights.reference) {
+        mesh.morphTargetInfluences = undefined;
+        continue;
+      }
+      mesh.morphTargetInfluences = morphWeights.reference;
+      morphWeights.reference.length = morphWeights.values.length;
+      for (let index = 0; index < morphWeights.values.length; index += 1) morphWeights.reference[index] = morphWeights.values[index];
     }
     root.updateMatrixWorld(true);
   }
@@ -415,8 +498,27 @@ function bakeAnimationClip(
       tracks.push({
         targetNodeId: nodeIdFor(object),
         property,
+        morphTargetIndex: -1,
         times: [...times],
         values: values[property],
+        interpolation: "linear",
+        baked: true,
+      });
+    }
+  }
+  for (const [object, targetNames] of morphTargetNamesByObject) {
+    const mesh = object as Mesh;
+    const initialValues = savedMorphWeights.get(mesh)?.initialTargetValues;
+    const targetValues = sampledMorphWeights.get(mesh);
+    if (!initialValues || !targetValues) continue;
+    for (let targetIndex = 0; targetIndex < targetNames.length; targetIndex += 1) {
+      if (!sampledValuesChange(targetValues[targetIndex], [initialValues[targetIndex]], 1)) continue;
+      tracks.push({
+        targetNodeId: nodeIdFor(object),
+        property: "morphWeight",
+        morphTargetIndex: targetIndex,
+        times: [...times],
+        values: targetValues[targetIndex],
         interpolation: "linear",
         baked: true,
       });
@@ -458,7 +560,7 @@ function sampledValuesChange(values: number[], original: readonly number[], dime
   return false;
 }
 
-function isAnimationProperty(value: string): value is ThreeUnityAnimationProperty {
+function isTransformAnimationProperty(value: string): value is ThreeUnityTransformAnimationProperty {
   return value === "position" || value === "quaternion" || value === "scale";
 }
 
@@ -562,10 +664,12 @@ async function exportInstances(
   object: Mesh & InstancedMeshLike,
   parentId: string,
   registerMesh: (mesh: Mesh) => Promise<string>,
+  morphTargetNamesByMeshId: Map<string, string[]>,
   nodes: ThreeUnityNode[],
   warnings: string[],
 ): Promise<void> {
   const meshId = await registerMesh(object);
+  const morphTargetCount = morphTargetNamesByMeshId.get(meshId)?.length ?? 0;
   const matrix = object.matrix.clone();
   const position = new Vector3();
   const rotation = new Quaternion();
@@ -584,11 +688,118 @@ async function exportInstances(
       layersMask: object.layers.mask,
       meshId,
       skinId: "",
+      morphWeights: Array.from({ length: morphTargetCount }, () => 0),
       metadataJson: `{\"threeUnityInstance\":${index}}`,
       components: [],
     });
   }
-  if (object.instanceColor) warnings.push(`${object.name || object.uuid}: per-instance colors are not exported in format v2.`);
+  if (object.instanceColor) warnings.push(`${object.name || object.uuid}: per-instance colors are not exported in format v3.`);
+}
+
+function readMorphAttributes(mesh: Mesh, semantic: "position" | "normal"): BufferAttribute[] {
+  const attributes = mesh.geometry.morphAttributes[semantic];
+  if (attributes === undefined) return [];
+  if (!Array.isArray(attributes)) throw new Error(`Mesh '${mesh.name || mesh.uuid}' morph ${semantic} attributes must be an array.`);
+  return attributes as BufferAttribute[];
+}
+
+function createMorphTargetNames(mesh: Mesh, positionAttributes: BufferAttribute[], normalAttributes: BufferAttribute[]): string[] {
+  if (positionAttributes.length === 0) {
+    if (normalAttributes.length > 0) throw new Error(`Mesh '${mesh.name || mesh.uuid}' has normal morph targets but no position morph targets.`);
+    return [];
+  }
+  if (normalAttributes.length > 0 && normalAttributes.length !== positionAttributes.length) {
+    throw new Error(
+      `Mesh '${mesh.name || mesh.uuid}' has ${positionAttributes.length} position morph targets but ${normalAttributes.length} normal morph targets.`,
+    );
+  }
+
+  const dictionary = mesh.morphTargetDictionary ?? {};
+  const usedNames = new Set<string>();
+  return positionAttributes.map((attribute, targetIndex) => {
+    const dictionaryName = Object.entries(dictionary)
+      .filter(([name, index]) => name.length > 0 && index === targetIndex)
+      .map(([name]) => name)
+      .sort()[0];
+    const normalAttributeName = normalAttributes[targetIndex]?.name;
+    const baseName = dictionaryName || attribute.name || normalAttributeName || `MorphTarget_${targetIndex}`;
+    let uniqueName = baseName;
+    let suffix = 1;
+    while (usedNames.has(uniqueName)) {
+      uniqueName = `${baseName} [${suffix}]`;
+      suffix += 1;
+    }
+    usedNames.add(uniqueName);
+    return uniqueName;
+  });
+}
+
+function exportMorphTargets(
+  mesh: Mesh,
+  basePosition: BufferAttribute,
+  baseNormal: BufferAttribute | undefined,
+  positionAttributes: BufferAttribute[],
+  normalAttributes: BufferAttribute[],
+  targetNames: string[],
+): ThreeUnityMorphTarget[] {
+  return positionAttributes.map((positionAttribute, targetIndex) => {
+    const targetName = targetNames[targetIndex];
+    const label = `Mesh '${mesh.name || mesh.uuid}' morph target '${targetName}'`;
+    const normalAttribute = normalAttributes[targetIndex];
+    if (normalAttribute && !baseNormal) throw new Error(`${label} has normal data but the base geometry has no normal attribute.`);
+    return {
+      name: targetName,
+      positionDeltas: morphAttributeToDeltas(positionAttribute, basePosition, mesh.geometry.morphTargetsRelative, `${label} position`),
+      normalDeltas: normalAttribute && baseNormal
+        ? morphAttributeToDeltas(normalAttribute, baseNormal, mesh.geometry.morphTargetsRelative, `${label} normal`)
+        : [],
+    };
+  });
+}
+
+function morphAttributeToDeltas(
+  attribute: BufferAttribute,
+  baseAttribute: BufferAttribute,
+  relative: boolean,
+  label: string,
+): number[] {
+  if (attribute.itemSize !== 3) throw new Error(`${label} attribute must have itemSize 3, received ${attribute.itemSize}.`);
+  if (baseAttribute.itemSize < 3) throw new Error(`${label} base attribute must provide 3 components.`);
+  if (attribute.count !== baseAttribute.count) {
+    throw new Error(`${label} vertex count ${attribute.count} does not match the base vertex count ${baseAttribute.count}.`);
+  }
+  const deltas: number[] = [];
+  for (let vertex = 0; vertex < attribute.count; vertex += 1) {
+    for (let component = 0; component < 3; component += 1) {
+      const targetValue = attribute.getComponent(vertex, component);
+      const baseValue = relative ? 0 : baseAttribute.getComponent(vertex, component);
+      const delta = targetValue - baseValue;
+      if (!Number.isFinite(targetValue) || !Number.isFinite(baseValue) || !Number.isFinite(delta)) {
+        throw new Error(`${label} contains a non-finite value at vertex ${vertex}, component ${component}.`);
+      }
+      deltas.push(delta);
+    }
+  }
+  return deltas;
+}
+
+function readMorphWeights(mesh: Mesh, targetNames: string[]): number[] {
+  return targetNames.map((targetName, targetIndex) => {
+    const value = mesh.morphTargetInfluences?.[targetIndex] ?? 0;
+    if (!Number.isFinite(value)) throw new Error(`Mesh '${mesh.name || mesh.uuid}' morph target '${targetName}' has non-finite influence '${value}'.`);
+    return value;
+  });
+}
+
+function readMorphInfluence(mesh: Mesh, targetIndex: number, targetName: string, clip: AnimationClip, initial: boolean): number {
+  const value = mesh.morphTargetInfluences?.[targetIndex] ?? 0;
+  if (!Number.isFinite(value)) {
+    const phase = initial ? "initial" : "sampled";
+    throw new Error(
+      `Animation '${clip.name || clip.uuid}' ${phase} non-finite influence '${value}' for mesh '${mesh.name || mesh.uuid}' morph target '${targetName}' (${targetIndex}).`,
+    );
+  }
+  return value;
 }
 
 function normalizeSkinAttributes(mesh: SkinnedMesh, position: BufferAttribute): Pick<ThreeUnityMesh, "skinIndices" | "skinWeights"> {
@@ -669,12 +880,12 @@ async function encodeTexture(texture: Texture, warnings: string[]): Promise<Pick
   const height = image?.height ?? 0;
   if (image?.data && width > 0 && height > 0) {
     if (!(image.data instanceof Uint8Array) && !(image.data instanceof Uint8ClampedArray)) {
-      warnings.push(`${texture.name || texture.uuid}: only unsigned-byte DataTexture is supported in format v2.`);
+      warnings.push(`${texture.name || texture.uuid}: only unsigned-byte DataTexture is supported in format v3.`);
       return { width, height, encoding: "rgba8", data: "" };
     }
     const bytes = image.data instanceof Uint8Array ? image.data : new Uint8Array(image.data);
     if (bytes.length !== width * height * 4) {
-      warnings.push(`${texture.name || texture.uuid}: only 4-channel Uint8 DataTexture is supported in format v2.`);
+      warnings.push(`${texture.name || texture.uuid}: only 4-channel Uint8 DataTexture is supported in format v3.`);
       return { width, height, encoding: "rgba8", data: "" };
     }
     return { width, height, encoding: "rgba8", data: bytesToBase64(bytes) };
