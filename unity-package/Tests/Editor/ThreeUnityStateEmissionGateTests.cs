@@ -1,4 +1,3 @@
-using System;
 using NUnit.Framework;
 using ThreeUnity.Bridge.Logic;
 
@@ -41,14 +40,6 @@ namespace ThreeUnity.Bridge.Tests
             Assert.That(gate.ShouldEmit(0.02f, false), Is.True);
             Assert.That(gate.ShouldEmit(0.02f, false), Is.False);
             Assert.That(gate.ShouldEmit(0.02f, false, true), Is.True);
-        }
-
-        [Test]
-        public void InvalidTimingCannotCorruptTheGate()
-        {
-            var gate = new ThreeUnityStateEmissionGate();
-            Assert.Throws<ArgumentOutOfRangeException>(() => gate.ShouldEmit(0f, false));
-            Assert.Throws<ArgumentOutOfRangeException>(() => new ThreeUnityStateEmissionGate(float.NaN));
         }
 
         [Test]

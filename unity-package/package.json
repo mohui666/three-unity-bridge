@@ -18,6 +18,11 @@
       "displayName": "Imported Triangle",
       "description": "A minimal .threeunity asset that can be dragged into a scene.",
       "path": "Samples~/Imported Triangle"
+    },
+    {
+      "displayName": "Animated Skinned Mesh",
+      "description": "A self-contained animated .threeunity character with a skinned mesh, bone hierarchy, and looping clip.",
+      "path": "Samples~/Animated Skinned Mesh"
     }
   ]
 }

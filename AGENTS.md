@@ -35,10 +35,12 @@ This repository builds a reusable Three.js-to-Unity bridge. Preserve the origina
 
 - Inspect `git status --short --branch` before editing and preserve unrelated user work.
 - Use `rg`/`rg --files` for discovery and `apply_patch` for hand edits.
-- Do not use Computer Use or GUI automation in this repository. Prefer CLI builds, test XML, process inspection, hashes, and runtime logs.
+- Do not use Computer Use or GUI automation in this repository. Prefer CLI builds, test XML, process inspection, and runtime logs.
+- Do not add or require hashes, checksums, file fingerprints, or duplicate integrity verification. A hash match must never gate startup, import, packaging, or bridge success.
+- Do not add defensive branches for hypothetical failures, silent fallbacks, automatic repair, redundant retries, or parallel compatibility paths unless the requested behavior defines them. Follow the declared contract directly and surface a precise error when it is violated.
 - Do not edit generated `dist/`, `dist-tests/`, `.NET bin/obj`, Unity `Library/Temp/Logs/Build`, or ignored integration workspaces as if they were source.
 - Do not copy source from an ignored upstream clone into the bridge without checking its license and keeping game fixes separated from reusable bridge changes.
-- Do not commit, push, open a PR, or rewrite history unless the user explicitly asks. Stage only paths owned by the current task.
+- Commit task-owned changes automatically after the required validation unless the user asks to leave them uncommitted. Do not push, open a PR, or rewrite history unless the user explicitly asks. Stage only paths owned by the current task.
 - Never commit credentials, local machine paths, WebView profiles, crash dumps, packaged Players, or dependency directories.
 - Keep TypeScript as ESM and compatible with the Node version in `package.json`.
 - Keep Runtime C# compatible with the Unity version currently used by the validation project. Avoid Editor-only APIs in `unity-package/Runtime`.
@@ -63,7 +65,7 @@ For Web Bridge lifecycle or packaging changes, also:
 3. Exercise the changed failure path (Host kill, connect timeout, page/listener timeout, logical restart, or shutdown as applicable).
 4. Confirm recovery reaches page ready, bridge ready, and a post-recovery logic tick.
 5. Confirm there is never more than one active Host generation and no Host/WebView child remains after Player exit.
-6. Compare every packaged web asset against the source manifest by relative path, size, and SHA-256.
+6. Confirm the packaged web asset set and relative paths through the real Player load path; do not add hash or checksum verification.
 7. Report visual/UI/input acceptance separately; automation logs do not prove visual fidelity.
 
 ## Performance work
@@ -77,5 +79,5 @@ For Web Bridge lifecycle or packaging changes, also:
 ## Documentation and evidence
 
 - Update `README.md`, `docs/BRIDGE_PERFORMANCE.md`, `unity-package/CHANGELOG.md`, and the relevant `conversions/*/RESULTS.md` when behavior or verified evidence changes.
-- Record exact commands, Unity/.NET/Node versions, test counts, important log markers, and artifact hashes.
+- Record exact commands, Unity/.NET/Node versions, test counts, and important log markers.
 - Label manual observations, automated assertions, benchmark results, and unresolved limitations accurately. Do not present an unverified assumption as a completed feature.

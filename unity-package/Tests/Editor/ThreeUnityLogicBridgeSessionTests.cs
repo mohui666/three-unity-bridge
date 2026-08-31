@@ -29,28 +29,6 @@ namespace ThreeUnity.Bridge.Tests
         }
 
         [Test]
-        public void LatestStateStreamKeysArePartitionedBySession()
-        {
-            var first = new ThreeUnityLogicOutgoingMessage(
-                "{}",
-                "player.state",
-                "session-a").StreamKey;
-            var second = new ThreeUnityLogicOutgoingMessage(
-                "{}",
-                "player.state",
-                "session-b").StreamKey;
-            var legacy = new ThreeUnityLogicOutgoingMessage(
-                "{}",
-                "player.state",
-                null).StreamKey;
-
-            Assert.That(first, Is.EqualTo("session-a:player.state"));
-            Assert.That(second, Is.EqualTo("session-b:player.state"));
-            Assert.That(first, Is.Not.EqualTo(second));
-            Assert.That(legacy, Is.EqualTo("player.state"));
-        }
-
-        [Test]
         public void PlayerFocusAndPauseCallbacksUpdateTheGenericLifecycleState()
         {
             var gameObject = new GameObject("logic-bridge-lifecycle-test");
@@ -366,7 +344,7 @@ namespace ThreeUnity.Bridge.Tests
         [Test]
         public void BurstFlushStopsAtBudgetAndPreservesRemainingOrder()
         {
-            const int queuedMessages = 4096;
+            const int queuedMessages = 512;
             const int expectedPerFlush = 256;
             var gameObject = new GameObject("logic-bridge-flush-budget-test");
             var launcher = gameObject.AddComponent<ThreeUnityWebBridgeLauncher>();

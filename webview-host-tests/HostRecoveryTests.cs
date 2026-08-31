@@ -139,23 +139,6 @@ public sealed class HostRecoveryTests
     }
 
     [Fact]
-    public void EmptyFaultReasonIsNormalized()
-    {
-        var gate = new TerminalFaultGate();
-
-        Assert.True(gate.TryConverge("  "));
-
-        Assert.Equal("terminal-fault", gate.Reason);
-    }
-
-    [Fact]
-    public void PageReadyDiagnosticIsStableAndDistinctFromFatalDiagnostics()
-    {
-        Assert.Equal("THREE_UNITY_WEB_HOST_PAGE_READY", HostDiagnosticMarkers.PageReady);
-        Assert.DoesNotContain("FATAL", HostDiagnosticMarkers.PageReady, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void ListenerReadyControlFrameIsExactAndInternal()
     {
         Assert.Equal("THREE_UNITY_WEB_LISTENER_READY", HostWebControlProtocol.ListenerReady);

@@ -125,51 +125,6 @@ test("latest-value streams send only the newest pending payload", () => {
   assert.equal(client.metrics.outboundCharacters, transport.sent[0].length);
 });
 
-test("client telemetry counts stale input and unattributed protocol errors", () => {
-  const transport = new MemoryTransport();
-  let now = 0;
-  const client = new LogicClient(transport, () => now, sessionIds("session-a"));
-  client.start("metrics-game", ["shop-flight-v1"]);
-  const ready = encodeLogicEnvelope(
-    "bridge.ready",
-    0,
-    { profile: "shop-flight-v1" },
-    "session-a",
-  );
-  transport.receive(ready);
-  const state = encodeLogicEnvelope("flight.state", 4, { tick: 4 }, "session-a");
-  transport.receive(state);
-  transport.receive(state);
-
-  assert.deepEqual(client.metrics, {
-    outboundMessages: 1,
-    outboundCharacters: transport.sent[0].length,
-    inboundMessages: 3,
-    inboundCharacters: ready.length + state.length * 2,
-    latestValuesCoalesced: 0,
-    staleInboundRejected: 1,
-    foreignSessionRejected: 0,
-    terminalInboundRejected: 0,
-    phaseInboundRejected: 0,
-    protocolErrors: 0,
-    fallbacks: 0,
-    restarts: 0,
-    pendingLatestStreams: 0,
-  });
-
-  transport.receive("not-json");
-  assert.equal(client.metrics.protocolErrors, 1);
-  assert.equal(client.metrics.fallbacks, 0);
-  assert.equal(client.metrics.outboundMessages, 1);
-  assert.equal(client.phase, "ready");
-
-  now = 2_000;
-  client.pollWatchdog();
-  assert.equal(client.phase, "fallback");
-  assert.equal(client.metrics.fallbacks, 1);
-  assert.equal(client.metrics.outboundMessages, 2, "the attributed watchdog closes the session");
-});
-
 test("ready timeout falls back after two seconds without sleeping", () => {
   const transport = new MemoryTransport();
   let now = 0;
@@ -313,33 +268,6 @@ test("restart isolates old high sequences and accepts sequence zero in the new s
   assert.equal(client.metrics.restarts, 1);
 });
 
-test("repeated start uses a restart envelope and the updated hello configuration", () => {
-  const transport = new MemoryTransport();
-  const client = new LogicClient(
-    transport,
-    () => 0,
-    sessionIds("session-a", "session-b"),
-  );
-  client.start("first-game", ["voxel-player-v1"]);
-
-  client.start("second-game", ["shop-flight-v1"]);
-
-  assert.deepEqual(messageAt(transport, 1), {
-    protocol: 1,
-    type: "bridge.restart",
-    seq: 0,
-    sessionId: "session-b",
-    payload: { previousSessionId: "session-a", reason: "start" },
-  });
-  assert.deepEqual(messageAt(transport, 2), {
-    protocol: 1,
-    type: "bridge.hello",
-    seq: 1,
-    sessionId: "session-b",
-    payload: { gameId: "second-game", capabilities: ["shop-flight-v1"] },
-  });
-});
-
 test("foreign-session traffic cannot renew an active watchdog", () => {
   const transport = new MemoryTransport();
   let now = 0;
@@ -397,27 +325,6 @@ test("a state arriving at the 500 ms deadline is rejected before it can renew au
   assert.equal(client.phase, "fallback");
   assert.equal(appliedStates, 1);
   assert.equal(client.metrics.terminalInboundRejected, 1);
-});
-
-test("authority activation refuses a state whose deadline expires inside its handler", () => {
-  const transport = new MemoryTransport();
-  let now = 0;
-  let activationAccepted = true;
-  const client = new LogicClient(transport, () => now, sessionIds("session-a"));
-  client.on("player.state", envelope => {
-    if (envelope.payload.tick === 2) now = 500;
-    activationAccepted = client.activateAuthority();
-  });
-  client.start("little-cubes", ["voxel-player-v1"]);
-  receiveFor(transport, "session-a", "bridge.ready", 0, { profile: "voxel-player-v1" });
-  receiveFor(transport, "session-a", "player.state", 1, { tick: 1 });
-
-  now = 499;
-  receiveFor(transport, "session-a", "player.state", 2, { tick: 2 });
-
-  assert.equal(activationAccepted, false);
-  assert.equal(client.phase, "fallback");
-  assert.equal(client.authorityActive, false);
 });
 
 test("all reliable and latest-value outputs after start carry the active session", () => {

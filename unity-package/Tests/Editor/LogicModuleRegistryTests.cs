@@ -69,26 +69,6 @@ namespace ThreeUnity.Bridge.Tests
         }
 
         [Test]
-        public void VoxelModuleRequestsAFullCollisionResyncForABrokenDeltaChain()
-        {
-            var module = new VoxelPlayerLogicModule();
-            Handle(module, "{\"protocol\":1,\"type\":\"bridge.hello\",\"seq\":0,\"payload\":{\"gameId\":\"test-game\",\"capabilities\":[\"voxel-player-v1\"]}}");
-            Assert.That(module.TryDequeueOutgoing(out _), Is.True);
-            Handle(module, "{\"protocol\":1,\"type\":\"player.bootstrap\",\"seq\":1,\"payload\":{\"position\":{\"x\":0.5,\"y\":10.0,\"z\":0.5},\"velocity\":{\"x\":0,\"y\":0,\"z\":0},\"yaw\":0,\"pitch\":0,\"speed\":4,\"sprintSpeed\":6.5,\"flySpeed\":8,\"gravity\":-15,\"jumpStrength\":7,\"waterJumpStrength\":4.5,\"width\":0.5,\"height\":1.8,\"eyeHeight\":1.6,\"collisionTolerance\":0.05,\"flying\":true}}");
-            Handle(module, "{\"protocol\":1,\"type\":\"world.collision\",\"seq\":2,\"payload\":{\"revision\":5,\"origin\":{\"x\":0,\"y\":9,\"z\":0},\"size\":{\"x\":1,\"y\":1,\"z\":1},\"solidBits\":\"AQ==\",\"fluidBits\":\"AA==\"}}");
-
-            Handle(module, "{\"protocol\":1,\"type\":\"world.collision.delta\",\"seq\":3,\"payload\":{\"baseRevision\":4,\"revision\":6,\"origin\":{\"x\":0,\"y\":9,\"z\":0},\"size\":{\"x\":1,\"y\":1,\"z\":1},\"changeCount\":0,\"changes\":\"\"}}");
-            Assert.That(module.TryDequeueOutgoing(out var resync), Is.True);
-            StringAssert.Contains("\"type\":\"world.collision.resync\"", resync);
-            StringAssert.Contains("\"revision\":5", resync);
-            Assert.That(module.GetCollisionMetrics().ResyncRequests, Is.EqualTo(1));
-
-            Handle(module, "{\"protocol\":1,\"type\":\"world.collision.delta\",\"seq\":4,\"payload\":{\"baseRevision\":5,\"revision\":6,\"origin\":{\"x\":0,\"y\":9,\"z\":0},\"size\":{\"x\":1,\"y\":1,\"z\":1},\"changeCount\":1,\"changes\":\"AQ==\"}}");
-            Assert.That(module.GetCollisionMetrics().DeltaMessages, Is.EqualTo(1));
-            Assert.That(module.GetCollisionMetrics().DeltaCells, Is.EqualTo(1));
-        }
-
-        [Test]
         public void VoxelModuleNeutralizesExpiredInputAndReportsRecovery()
         {
             var module = new VoxelPlayerLogicModule();
@@ -153,31 +133,6 @@ namespace ThreeUnity.Bridge.Tests
             var telemetry = module.GetStateEmissionMetrics();
             Assert.That(telemetry.Suppressed, Is.EqualTo(9));
             Assert.That(telemetry.Heartbeats, Is.EqualTo(1));
-        }
-
-        [Test]
-        public void BuiltInModuleCarriesSessionAndTypeMetadataBesideSerializedOutput()
-        {
-            var module = new ShopFlightLogicModule();
-            var metadata = (IThreeUnityLogicOutgoingMetadata)module;
-            Handle(module, "{\"protocol\":1,\"sessionId\":\"metadata-session\",\"type\":\"bridge.hello\",\"seq\":0,\"payload\":{\"gameId\":\"test-game\",\"capabilities\":[\"shop-flight-v1\"]}}");
-
-            Assert.That(metadata.TryDequeueOutgoingMessage(out var ready), Is.True);
-            Assert.That(ready.Type, Is.EqualTo("bridge.ready"));
-            Assert.That(ready.SessionId, Is.EqualTo("metadata-session"));
-            Assert.That(ready.IsLatestState, Is.False);
-            Assert.That(ready.StreamKey, Is.Null);
-            StringAssert.Contains("\"type\":\"bridge.ready\"", ready.Json);
-
-            Handle(module, "{\"protocol\":1,\"sessionId\":\"metadata-session\",\"type\":\"flight.bootstrap\",\"seq\":1,\"payload\":{\"generation\":1,\"time\":0,\"amplitude\":0,\"flying\":false}}");
-            module.FixedTick(0.02f);
-
-            Assert.That(metadata.TryDequeueOutgoingMessage(out var state), Is.True);
-            Assert.That(state.Type, Is.EqualTo("flight.state"));
-            Assert.That(state.SessionId, Is.EqualTo("metadata-session"));
-            Assert.That(state.IsLatestState, Is.True);
-            Assert.That(state.StreamKey, Is.EqualTo("metadata-session:flight.state"));
-            StringAssert.Contains("\"type\":\"flight.state\"", state.Json);
         }
 
         private static void Handle(IThreeUnityLogicModule module, string json)

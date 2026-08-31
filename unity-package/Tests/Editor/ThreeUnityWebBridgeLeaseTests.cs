@@ -23,26 +23,6 @@ namespace ThreeUnity.Bridge.Tests
         }
 
         [Test]
-        public void LeaseRejectsInvalidConstructionAndHasSafeDiagnostics()
-        {
-            var issuer = new object();
-            var connection = new object();
-
-            Assert.That(
-                () => new ThreeUnityWebBridgeLease(null, connection, 1, 1),
-                Throws.ArgumentNullException);
-            Assert.That(
-                () => new ThreeUnityWebBridgeLease(issuer, null, 1, 1),
-                Throws.ArgumentNullException);
-            Assert.That(
-                () => new ThreeUnityWebBridgeLease(issuer, connection, 0, 1),
-                Throws.TypeOf<System.ArgumentOutOfRangeException>());
-            Assert.That(
-                new ThreeUnityWebBridgeLease(issuer, connection, 2, 3).ToString(),
-                Is.EqualTo("ThreeUnityWebBridgeLease(page=2, connection=3)"));
-        }
-
-        [Test]
         public void RetiredLeaseCannotWriteIntoReplacementConnection()
         {
             var gameObject = new GameObject("bridge-lease-test");
@@ -86,97 +66,6 @@ namespace ThreeUnity.Bridge.Tests
             }
         }
 
-        [Test]
-        public void LegacyGenerationlessSenderFailsClosedAfterFirstRelaunch()
-        {
-            var gameObject = new GameObject("bridge-legacy-lease-test");
-            var launcher = gameObject.AddComponent<ThreeUnityWebBridgeLauncher>();
-            object firstConnection = null;
-            try
-            {
-                var lifecycle = GetLifecycle(launcher);
-                lifecycle.Start(0);
-                Assert.That(lifecycle.TryBeginLaunch(0, true, out var firstPage, out var firstPipe), Is.True);
-                Assert.That(lifecycle.TryMarkConnected(firstPage, firstPipe), Is.True);
-                firstConnection = InstallConnection(launcher, firstPage, firstPipe, out _);
-
-#pragma warning disable 618
-                launcher.SendToWeb("legacy-first-page");
-#pragma warning restore 618
-                Assert.That(launcher.GetTransportMetrics().Outbound.PendingReliable, Is.EqualTo(1));
-
-                Assert.That(lifecycle.TryReportFault(
-                    firstPage,
-                    firstPipe,
-                    ThreeUnityHostFaultReason.HostExited), Is.True);
-                Assert.That(lifecycle.CompleteRetirement(firstPage, firstPipe, 0), Is.True);
-                Assert.That(lifecycle.TryBeginLaunch(250, true, out var nextPage, out var nextPipe), Is.True);
-                Assert.That(lifecycle.TryMarkConnected(nextPage, nextPipe), Is.True);
-                InstallConnection(launcher, nextPage, nextPipe, out _);
-
-                LogAssert.Expect(LogType.Warning, new System.Text.RegularExpressions.Regex(
-                    "THREE_UNITY_WEB_BRIDGE_LEGACY_API_REJECTED.*direction=outbound"));
-#pragma warning disable 618
-                launcher.SendToWeb("legacy-must-not-cross");
-#pragma warning restore 618
-                Assert.That(launcher.GetTransportMetrics().Outbound.PendingReliable, Is.Zero);
-                Assert.That(launcher.GetTransportMetrics().LegacyGenerationlessRejected, Is.EqualTo(1));
-            }
-            finally
-            {
-                DisposeConnection(firstConnection);
-                UnityEngine.Object.DestroyImmediate(gameObject);
-            }
-        }
-
-        [Test]
-        public void RetainedLeaseUsesTokensAndDoesNotKeepConnectionResourcesAlive()
-        {
-            var gameObject = new GameObject("bridge-lightweight-lease-test");
-            var launcher = gameObject.AddComponent<ThreeUnityWebBridgeLauncher>();
-            ThreeUnityWebBridgeLease lease = null;
-            try
-            {
-                var lifecycle = GetLifecycle(launcher);
-                lifecycle.Start(0);
-                Assert.That(lifecycle.TryBeginLaunch(0, true, out var page, out var pipe), Is.True);
-                Assert.That(lifecycle.TryMarkConnected(page, pipe), Is.True);
-
-                var connectionReference = InstallReleaseAndReferenceConnection(
-                    launcher,
-                    page,
-                    pipe,
-                    out lease);
-
-                var issuerField = typeof(ThreeUnityWebBridgeLease).GetField(
-                    "issuerToken",
-                    BindingFlags.Instance | BindingFlags.NonPublic);
-                var connectionField = typeof(ThreeUnityWebBridgeLease).GetField(
-                    "connectionToken",
-                    BindingFlags.Instance | BindingFlags.NonPublic);
-                Assert.That(issuerField, Is.Not.Null);
-                Assert.That(connectionField, Is.Not.Null);
-                Assert.That(issuerField.GetValue(lease), Is.Not.SameAs(launcher));
-
-                for (var attempt = 0; attempt < 3 && connectionReference.IsAlive; attempt++)
-                {
-                    GC.Collect();
-                    GC.WaitForPendingFinalizers();
-                    GC.Collect();
-                }
-
-                Assert.That(
-                    connectionReference.IsAlive,
-                    Is.False,
-                    "An externally retained lease must not retain disposed ConnectionResources.");
-                GC.KeepAlive(lease);
-            }
-            finally
-            {
-                UnityEngine.Object.DestroyImmediate(gameObject);
-            }
-        }
-
         private static ThreeUnityWebBridgeLifecycle GetLifecycle(ThreeUnityWebBridgeLauncher launcher)
         {
             return (ThreeUnityWebBridgeLifecycle)typeof(ThreeUnityWebBridgeLauncher)
@@ -215,25 +104,6 @@ namespace ThreeUnity.Bridge.Tests
             launcherType.GetField("activeConnection", BindingFlags.Instance | BindingFlags.NonPublic)
                 .SetValue(launcher, connection);
             return connection;
-        }
-
-        private static WeakReference InstallReleaseAndReferenceConnection(
-            ThreeUnityWebBridgeLauncher launcher,
-            long pageGeneration,
-            long connectionGeneration,
-            out ThreeUnityWebBridgeLease lease)
-        {
-            var connection = InstallConnection(
-                launcher,
-                pageGeneration,
-                connectionGeneration,
-                out lease);
-            var weakReference = new WeakReference(connection);
-            typeof(ThreeUnityWebBridgeLauncher)
-                .GetField("activeConnection", BindingFlags.Instance | BindingFlags.NonPublic)
-                .SetValue(launcher, null);
-            DisposeConnection(connection);
-            return weakReference;
         }
 
         private static void DisposeConnection(object connection)

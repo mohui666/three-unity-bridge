@@ -34,8 +34,8 @@
     "benchmark:collision": "npm run build && node benchmarks/collision-transport.mjs",
     "benchmark:input": "npm run build && node benchmarks/input-transport.mjs",
     "example": "npm run build && node examples/generate-scene.mjs",
-    "conversions:capture": "node conversion-tools/capture-games.mjs",
-    "check": "npm run test"
+    "example:animated": "npm run build && node examples/generate-skinned-animation.mjs",
+    "conversions:capture": "node conversion-tools/capture-games.mjs"
   },
   "keywords": [
     "three.js",

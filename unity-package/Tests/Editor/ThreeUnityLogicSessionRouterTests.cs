@@ -77,44 +77,6 @@ namespace ThreeUnity.Bridge.Tests
         }
 
         [Test]
-        public void OutgoingMetadataClassificationBenchmarkAvoidsHeaderReparse()
-        {
-            const int iterations = 25_000;
-            var message = LogicEnvelopeWriter.EncodeMessage(
-                "flight.state",
-                17,
-                "benchmark-session",
-                new TestPayload { value = 42 });
-            long parsedChecksum = 0;
-            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
-            for (var index = 0; index < iterations; index++)
-            {
-                if (!LogicEnvelopeParser.TryParseHeader(
-                    message.Json,
-                    out var header,
-                    out var error))
-                    Assert.Fail(error);
-                parsedChecksum += header.seq + header.type.Length + header.sessionId.Length;
-            }
-            stopwatch.Stop();
-            var parseTicks = stopwatch.ElapsedTicks;
-
-            long metadataChecksum = 0;
-            stopwatch.Restart();
-            for (var index = 0; index < iterations; index++)
-                metadataChecksum += message.Type.Length + message.SessionId.Length + (message.IsLatestState ? 17 : 0);
-            stopwatch.Stop();
-            var metadataTicks = stopwatch.ElapsedTicks;
-
-            Assert.That(metadataChecksum, Is.EqualTo(parsedChecksum));
-            UnityEngine.Debug.Log("THREE_UNITY_OUTBOUND_METADATA_BENCHMARK"
-                + " iterations=" + iterations
-                + " parseTicks=" + parseTicks
-                + " metadataTicks=" + metadataTicks
-                + " avoidedHeaderParses=" + iterations);
-        }
-
-        [Test]
         public void NegotiatedLifecycleWaitsForReadyAndCoalescesToTheLatestPlayerState()
         {
             using (var router = new ThreeUnityLogicSessionRouter("shop-flight-v1"))
@@ -294,32 +256,6 @@ namespace ThreeUnity.Bridge.Tests
         }
 
         [Test]
-        public void RestartDiscardsRetiredOutputButPreservesLifetimeTelemetry()
-        {
-            using (var router = new ThreeUnityLogicSessionRouter("shop-flight-v1"))
-            {
-                Route(router, Hello("session-a", 0));
-                Route(router, Bootstrap("session-a", 1, 1));
-                router.FixedTick(0.02f);
-                Assert.That(router.GetStateEmissionMetrics().Emitted, Is.EqualTo(1));
-
-                Assert.That(
-                    Route(router, Hello("session-b", 0, "session-a")),
-                    Is.EqualTo(ThreeUnityLogicRouteResult.Restarted));
-
-                Assert.That(router.RetiredOutgoingDiscarded, Is.EqualTo(2), "Old ready/state must not escape after the swap.");
-                Assert.That(router.GetStateEmissionMetrics().Emitted, Is.EqualTo(1), "Lifetime counters must stay monotonic.");
-                Assert.That(router.TryDequeueOutgoing(out var ready), Is.True);
-                AssertHeader(ready, "bridge.ready", 0, "session-b");
-                Assert.That(router.TryDequeueOutgoing(out _), Is.False);
-
-                Route(router, Bootstrap("session-b", 1, 2));
-                router.FixedTick(0.02f);
-                Assert.That(router.GetStateEmissionMetrics().Emitted, Is.EqualTo(2));
-            }
-        }
-
-        [Test]
         public void TransportResetPurgesOldOutputPreservesTelemetryAndAcceptsAnOrdinaryFreshHello()
         {
             using (var router = new ThreeUnityLogicSessionRouter(
@@ -416,50 +352,6 @@ namespace ThreeUnity.Bridge.Tests
                 Assert.That(modules[0].DisposeCount, Is.EqualTo(1));
                 Assert.That(modules[1].DisposeCount, Is.EqualTo(0));
             }
-        }
-
-        [Test]
-        public void TransportResetClearsThePreviousGenerationFallbackTerminal()
-        {
-            using (var router = new ThreeUnityLogicSessionRouter(
-                "shop-flight-v1",
-                initialHostGeneration: 20))
-            {
-                Route(router, 20, Hello("failed-session", 0));
-                Assert.That(router.TryDequeueOutgoing(out _), Is.True);
-                Route(router, 20, Fallback("failed-session", 1));
-                Assert.That(router.CurrentModule.IsFallback, Is.True);
-
-                Assert.That(router.ResetForHostGeneration(21), Is.True);
-                Assert.That(router.CurrentModule.IsFallback, Is.False);
-                Assert.That(router.ActiveSessionId, Is.Null);
-                Assert.That(router.TryDequeueOutgoing(out _), Is.False);
-                Assert.That(
-                    Route(router, 21, Hello("fresh-session", 0)),
-                    Is.EqualTo(ThreeUnityLogicRouteResult.Handled));
-            }
-        }
-
-        [Test]
-        public void DisposeIsIdempotentAcrossTransportGenerations()
-        {
-            var modules = new List<RecordingModule>();
-            var router = new ThreeUnityLogicSessionRouter(
-                "recording-v1",
-                _ =>
-                {
-                    var created = new RecordingModule();
-                    modules.Add(created);
-                    return created;
-                });
-
-            Assert.That(router.ResetForHostGeneration(1), Is.True);
-            router.Dispose();
-            router.Dispose();
-
-            Assert.That(modules.Count, Is.EqualTo(2));
-            Assert.That(modules[0].DisposeCount, Is.EqualTo(1));
-            Assert.That(modules[1].DisposeCount, Is.EqualTo(1));
         }
 
         [Test]

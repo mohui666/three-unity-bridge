@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Added `.threeunity` format v2 for `SkinnedMesh`, stable node-id bone references, four-weight skinning, bind poses, and baked transform animation tracks.
+- Added Unity `SkinnedMeshRenderer` import, `AnimationClip` subassets, and `ThreeUnityAnimationPlayer` for controller-free default playback and clip-name playback.
+- Added a self-contained animated three-bone sample and focused exporter/importer deformation smoke coverage while retaining v1 static-asset import compatibility.
+- Animated bounds now include curve-key deformation samples, and version-2 Unity node names use escaped source names plus stable node ids so every `AnimationClip` path is unambiguous.
+- Streamlined the default package regression suite by removing duplicated boundary permutations, test-only benchmarks, obsolete compatibility cases, and synthetic defensive-failure tests while retaining importer, session, queue, lifecycle, profile, and Windows Job contracts.
+
 ## 0.1.0 - 2026-08-30
 
 - Added the `.threeunity` scripted importer.

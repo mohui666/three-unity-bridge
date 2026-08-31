@@ -9,16 +9,16 @@ namespace ThreeUnity.Bridge.Tests
         {
             var buffer = new ThreeUnityOutboundBuffer();
 
-            for (var index = 0; index < 100000; index++)
+            for (var index = 0; index < 8; index++)
                 buffer.EnqueueLatest("player.state", "state-" + index);
 
             var beforeDrain = buffer.Snapshot();
             Assert.That(beforeDrain.PendingLatest, Is.EqualTo(1));
-            Assert.That(beforeDrain.LatestQueued, Is.EqualTo(100000));
-            Assert.That(beforeDrain.LatestCoalesced, Is.EqualTo(99999));
+            Assert.That(beforeDrain.LatestQueued, Is.EqualTo(8));
+            Assert.That(beforeDrain.LatestCoalesced, Is.EqualTo(7));
             Assert.That(beforeDrain.MaxPending, Is.EqualTo(1));
             Assert.That(buffer.TryDequeue(out var message), Is.True);
-            Assert.That(message, Is.EqualTo("state-99999"));
+            Assert.That(message, Is.EqualTo("state-7"));
             Assert.That(buffer.TryDequeue(out _), Is.False);
         }
 

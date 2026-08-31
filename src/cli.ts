@@ -22,7 +22,7 @@ async function main(): Promise<void> {
       process.exitCode = 1;
       return;
     }
-    console.log(`${input}: valid three-unity-scene v1`);
+    console.log(`${input}: valid three-unity-scene v${(document as { version: number }).version}`);
     return;
   }
 

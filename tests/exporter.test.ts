@@ -1,19 +1,29 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  AnimationClip,
+  Bone,
   BoxGeometry,
+  BufferGeometry,
   DataTexture,
   DirectionalLight,
+  Float32BufferAttribute,
   InstancedMesh,
   Matrix4,
   Mesh,
   MeshLambertMaterial,
   MeshStandardMaterial,
   PerspectiveCamera,
+  Quaternion,
+  QuaternionKeyframeTrack,
   RGBAFormat,
   Scene,
+  Skeleton,
+  SkinnedMesh,
   SRGBColorSpace,
+  Uint16BufferAttribute,
   UnsignedByteType,
+  Vector3,
 } from "three";
 import { exportThreeUnity, validateDocument } from "../src/index.js";
 
@@ -118,14 +128,104 @@ test("exports reusable playable runtime configuration", async () => {
 
 test("accepts pre-runtime format-v1 documents with Unity's safe defaults", async () => {
   const scene = new Scene();
-  const legacyDocument: Partial<Awaited<ReturnType<typeof exportThreeUnity>>> = await exportThreeUnity(scene);
+  const legacyDocument = await exportThreeUnity(scene) as unknown as Record<string, unknown>;
+  legacyDocument.version = 1;
   delete legacyDocument.runtime;
+  delete legacyDocument.skins;
+  delete legacyDocument.animations;
+  delete legacyDocument.defaultAnimationId;
+  delete legacyDocument.autoplayAnimation;
 
   assert.deepEqual(validateDocument(legacyDocument), { valid: true, errors: [] });
   assert.deepEqual(validateDocument({ ...legacyDocument, runtime: null }), {
     valid: false,
     errors: ["runtime must be an object when present."],
   });
+});
+
+test("exports a two-bone SkinnedMesh and baked AnimationClip with stable node references", async () => {
+  const scene = new Scene();
+  const geometry = new BufferGeometry();
+  geometry.setAttribute("position", new Float32BufferAttribute([
+    -0.4, 0, 0, 0.4, 0, 0,
+    -0.4, 1, 0, 0.4, 1, 0,
+    -0.4, 2, 0, 0.4, 2, 0,
+  ], 3));
+  geometry.setIndex([0, 1, 2, 1, 3, 2, 2, 3, 4, 3, 5, 4]);
+  geometry.setAttribute("skinIndex", new Uint16BufferAttribute([
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 1, 0, 0, 0, 1, 0, 0,
+    1, 0, 0, 0, 1, 0, 0, 0,
+  ], 4));
+  geometry.setAttribute("skinWeight", new Float32BufferAttribute([
+    2, 0, 0, 0, 2, 0, 0, 0,
+    1, 1, 0, 0, 1, 1, 0, 0,
+    3, 0, 0, 0, 3, 0, 0, 0,
+  ], 4));
+  geometry.computeVertexNormals();
+
+  const rootBone = new Bone();
+  rootBone.name = "Joint";
+  const tipBone = new Bone();
+  tipBone.name = "Joint";
+  tipBone.position.y = 1;
+  rootBone.add(tipBone);
+  const mesh = new SkinnedMesh(geometry, new MeshStandardMaterial());
+  mesh.name = "Animated Strip";
+  mesh.add(rootBone);
+  scene.add(mesh);
+  mesh.bind(new Skeleton([rootBone, tipBone]));
+
+  const bend = new Quaternion().setFromAxisAngle(new Vector3(0, 0, 1), Math.PI / 4);
+  const clip = new AnimationClip("Bend", 1, [
+    new QuaternionKeyframeTrack(`${tipBone.uuid}.quaternion`, [0, 0.5, 1], [
+      0, 0, 0, 1,
+      bend.x, bend.y, bend.z, bend.w,
+      0, 0, 0, 1,
+    ]),
+  ]);
+  scene.animations.push(clip);
+  const originalQuaternion = tipBone.quaternion.toArray();
+
+  const document = await exportThreeUnity(scene, {
+    defaultAnimation: "Bend",
+    autoplayAnimation: true,
+    animationLoop: true,
+    animationSampleRate: 10,
+  });
+
+  assert.deepEqual(validateDocument(document), { valid: true, errors: [] });
+  assert.equal(document.version, 2);
+  assert.equal(document.skins.length, 1);
+  assert.equal(document.animations.length, 1);
+  assert.equal(document.autoplayAnimation, true);
+  assert.equal(document.defaultAnimationId, document.animations[0].id);
+  assert.deepEqual(tipBone.quaternion.toArray(), originalQuaternion);
+
+  const exportedMesh = document.meshes[0];
+  assert.equal(exportedMesh.skinIndices.length, 6 * 4);
+  assert.equal(exportedMesh.skinWeights.length, 6 * 4);
+  assert.deepEqual(exportedMesh.skinWeights.slice(8, 12), [0.5, 0.5, 0, 0]);
+  const skin = document.skins[0];
+  const jointNodes = document.nodes.filter((node) => node.name === "Joint");
+  assert.equal(jointNodes.length, 2);
+  assert.deepEqual(new Set(skin.boneNodeIds), new Set(jointNodes.map((node) => node.id)));
+  assert.equal(skin.inverseBindMatrices.length, 2 * 16);
+  assert.equal(skin.bindMatrix.length, 16);
+  assert.equal(document.nodes.find((node) => node.name === "Animated Strip")?.skinId, skin.id);
+  const tipNode = jointNodes.find((node) => node.id === skin.boneNodeIds[1]);
+  assert.ok(tipNode);
+  const quaternionTrack = document.animations[0].tracks.find((track) => track.targetNodeId === tipNode.id && track.property === "quaternion");
+  assert.ok(quaternionTrack);
+  assert.equal(quaternionTrack.times.at(-1), 1);
+  assert.equal(quaternionTrack.values.length, quaternionTrack.times.length * 4);
+
+  const skinnedNode = document.nodes.find((node) => node.skinId === skin.id);
+  assert.ok(skinnedNode);
+  skinnedNode.meshId = "";
+  const missingMeshValidation = validateDocument(document);
+  assert.equal(missingMeshValidation.valid, false);
+  assert.match(missingMeshValidation.errors.join("\n"), /must reference a mesh/);
 });
 
 test("omits invisible subtrees by default", async () => {

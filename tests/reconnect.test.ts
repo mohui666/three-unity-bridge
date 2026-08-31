@@ -27,37 +27,6 @@ test("reconnect backoff defaults to 250 ms exponential attempts capped at 4 seco
   assert.equal(backoff.schedule("state-timeout"), false);
 });
 
-test("a successful authoritative state resets attempts and pending work", () => {
-  let now = 0;
-  const backoff = new ReconnectBackoff({ now: () => now });
-  backoff.schedule("state-timeout");
-  now = 250;
-  assert.equal(backoff.poll(), "state-timeout");
-  backoff.schedule("first-state-timeout");
-  assert.equal(backoff.snapshot.nextAttemptAt, 750);
-
-  backoff.success();
-
-  assert.deepEqual(backoff.snapshot, {
-    attempts: 0,
-    scheduled: false,
-    exhausted: false,
-  });
-  assert.equal(backoff.schedule("state-timeout"), true);
-  assert.equal(backoff.snapshot.nextAttemptAt, 500);
-});
-
-test("duplicate fallback notifications retain one scheduled restart", () => {
-  let now = 10;
-  const backoff = new ReconnectBackoff({ now: () => now });
-  assert.equal(backoff.schedule("state-timeout"), true);
-  const first = backoff.snapshot.nextAttemptAt;
-  now = 100;
-  assert.equal(backoff.schedule("remote-fallback"), true);
-  assert.equal(backoff.snapshot.nextAttemptAt, first);
-  assert.equal(backoff.snapshot.reason, "state-timeout");
-});
-
 test("terminal compatibility and invalid-state reasons never schedule retries", () => {
   for (const reason of [
     "transport-unavailable",

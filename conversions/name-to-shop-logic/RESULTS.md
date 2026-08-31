@@ -44,20 +44,20 @@ The listener gate is now document-scoped: page-ready still supports untouched pa
 
 Four current-run fault tests passed:
 
-| Mode | Required recovery | Result | Log SHA-256 |
+| Mode | Required recovery | Result | Log |
 | --- | --- | --- | --- |
-| Host kill | old Host exit → Job zero → different PID → page/logic ready → tick | `MaxConcurrentHostsObserved=1`, `OrphanHost=False` | `59A4BEF07B9B65ACE80285345F00E024FEC0CD07DA3A341ADCD3F73F546D7B25` |
-| Connect timeout | no early connection/readiness → `connect-timeout` → replacement ready/tick | `MaxConcurrentHostsObserved=1`, `OrphanHost=False` | `1592E44CDAE9D9AA8328DE5D172546321FFA8251B929849D41D7D383E2106206` |
-| Page-ready timeout | connected but no early page/logic ready → old handle exit → Job zero → replacement ready/tick | `MaxConcurrentHostsObserved=1`, `OrphanHost=False` | `F52A4050C637670572136A817FAFB94D6D769B06F3F515FCAA6F2178404659C8` |
-| Logical restart + runtime lifecycle | focus transitions → ready/lifecycle ACK → session restart → new ready/lifecycle ACK → later tick | same Host, `OrphanHost=False`, `metadataFast=21`, `metadataFallback=0`, `flushBudgetStops=0`, `maxFlush=2`, `lifecycleEmitted=2`, `lifecycleAck=2`, `lifecycleAckRejected=0` | `2D48BAF276DB2C3E5159042BF3DD55A82E28038D7A74EB4F0FB4F33B9D7D3BFC` |
+| Host kill | old Host exit → Job zero → different PID → page/logic ready → tick | `MaxConcurrentHostsObserved=1`, `OrphanHost=False` | `NameToShopLogicBridge-HostKill-document-job-v2.log` |
+| Connect timeout | no early connection/readiness → `connect-timeout` → replacement ready/tick | `MaxConcurrentHostsObserved=1`, `OrphanHost=False` | `NameToShopLogicBridge-ConnectTimeout-document-job-v2.log` |
+| Page-ready timeout | connected but no early page/logic ready → old handle exit → Job zero → replacement ready/tick | `MaxConcurrentHostsObserved=1`, `OrphanHost=False` | `NameToShopLogicBridge-PageReadyTimeout-document-job-v2.log` |
+| Logical restart + runtime lifecycle | focus transitions → ready/lifecycle ACK → session restart → new ready/lifecycle ACK → later tick | same Host, `OrphanHost=False`, `metadataFast=21`, `metadataFallback=0`, `flushBudgetStops=0`, `maxFlush=2`, `lifecycleEmitted=2`, `lifecycleAck=2`, `lifecycleAckRejected=0` | `NameToShopLogicBridge-RuntimeLifecycle-v2.log` |
 
 `shop-flight-v1` is a command/state profile and has no retained movement input, so its logical test explicitly uses `-SkipInputStale`; all protocol, lifecycle, process, failure-marker, and shutdown checks remain enabled. Every passing physical log has zero reliable backpressure/drop, cleanup-timeout, fatal-diagnostic, and crash markers. The failed-input-stale precondition run is not counted as acceptance evidence.
 
-Current automated gates pass 75/75 root TypeScript tests, 28/28 WebView Host .NET tests, 14/14 LittleCubes adapter tests, 36/36 name-to-shop tests, and 107/107 Unity EditMode tests. The Unity XML (`runtime-lifecycle-v2-editmode.xml`, 89,476 bytes) has SHA-256 `94765093F01404565A13B438729AB68DEEC34BFDD45E6F24D7FA16CE0460B6CF`.
+The current streamlined source gates pass 64/64 root TypeScript tests, 26/26 WebView Host .NET tests, and 84/84 Unity EditMode tests. The 14/14 LittleCubes and 36/36 name-to-shop adapter results remain the 2026-08-30 conversion snapshot and were not rerun for the test-suite cleanup.
 
 ## Current session-restart Player evidence
 
-The current `shop-flight-v1` Player reconnect run passed. Its log is `unity-winding-verify-20260830/NameToShopLogicBridge-RuntimeLifecycle-v2.log` (`Length=4892`, SHA-256 `2D48BAF276DB2C3E5159042BF3DD55A82E28038D7A74EB4F0FB4F33B9D7D3BFC`). The decisive markers occurred in this order:
+The current `shop-flight-v1` Player reconnect run passed. Its log is `unity-winding-verify-20260830/NameToShopLogicBridge-RuntimeLifecycle-v2.log`. The decisive markers occurred in this order:
 
 ```text
 40: THREE_UNITY_RUNTIME_LIFECYCLE source=focus focused=0 paused=0 active=0 revision=1
@@ -114,6 +114,6 @@ THREE_UNITY_BRIDGE_PERF profile=shop-flight-v1 writer=background rx=3 tx=20 rxCh
 THREE_UNITY_LOGIC_TICK profile=shop-flight-v1 ticks=240
 ```
 
-The transient `outPending=1` is the newest state waiting for the background writer; the queue never exceeded one item and no reliable message was dropped. Current automated validation counts are recorded in the physical-lifecycle section above. Coverage includes the deterministic 100,000-state flood, reliable queue ordering/capacity, heartbeat scheduling, idle suppression, session routing and owner purge, negotiated retry, generation/tick fencing, document-scoped listener readiness, retried Job termination, invalid-state termination, and the existing motor/protocol regressions.
+The transient `outPending=1` is the newest state waiting for the background writer; the queue never exceeded one item and no reliable message was dropped. Current automated validation counts are recorded in the physical-lifecycle section above. Coverage keeps the final-value coalescing contract with a minimal update sequence, reliable queue ordering/capacity, heartbeat scheduling, idle suppression, session routing and owner purge, negotiated retry, generation/tick fencing, document-scoped listener readiness, and the existing motor/protocol regressions.
 
 The WebView Host was then upgraded from overlapping `async void` pipe writes and one `BeginInvoke` per Unity message to two bounded single-consumer pumps. Web→Unity writes are serialized in arrival order; Unity→Web messages are dispatched to WebView2 in batches of up to 64 without allowing more than 1,024 pending messages. The rebuilt Player completed its bidirectional hello/ready/bootstrap exchange and remained healthy for more than 1,320 fixed ticks. A separate abrupt-parent-exit test terminated Player PID 44212 and observed child Host PID 38956 exit 140ms later, confirming that the 250ms parent watcher prevents orphaned WebView processes.

@@ -131,15 +131,15 @@ After installing the package in a Unity test project, run EditMode tests:
   -logFile C:\Path\To\tests.log
 ```
 
-`ThreeUnityOutboundBufferTests` includes a 100,000-state flood. It must leave exactly one pending message containing the final state. `ThreeUnityStateEmissionGateTests` verifies immediate changes/acknowledgements and deterministic heartbeat suppression.
+`ThreeUnityOutboundBufferTests` uses a minimal multi-update state sequence. It must leave exactly one pending message containing the final state. `ThreeUnityStateEmissionGateTests` verifies immediate changes/acknowledgements and deterministic heartbeat suppression.
 
-`input-transport.mjs` asserts at least 90% message and character reduction while verifying critical digital edges. `collision-transport.mjs` asserts at least 90% sampling reduction and 35% envelope-character reduction while round-tripping every optimized window.
+`input-transport.mjs` asserts at least 90% message and character reduction while verifying critical digital edges. `collision-transport.mjs` asserts at least 85% sampling reduction and 35% envelope-character reduction. Sparse-window round-trip correctness is covered by the root protocol unit test rather than duplicated inside the benchmark.
 
-`ThreeUnityLogicSessionRouterTests.OutgoingMetadataClassificationBenchmarkAvoidsHeaderReparse` classifies the same serialized state 25,000 times through both paths. On the current machine, header parsing used 523,127 `Stopwatch` ticks while the producer metadata path used 6,124 ticks (85.4x fewer elapsed ticks) and avoided all 25,000 header parses. The assertion also checks that both paths classify the same session/type data; the timing is a local comparative benchmark, not a cross-machine absolute promise.
+`ThreeUnityLogicBridgeSessionTests.BurstFlushStopsAtBudgetAndPreservesRemainingOrder` queues 512 reliable messages. The first invocation accepts exactly 256 and retains 256; a second invocation continues at message 256 with no gap or reordering.
 
-`ThreeUnityLogicBridgeSessionTests.BurstFlushStopsAtBudgetAndPreservesRemainingOrder` queues 4,096 reliable messages. The first invocation accepts exactly 256 and retains 3,840; a second invocation continues at message 256 with no gap or reordering. Its deterministic marker is `THREE_UNITY_OUTBOUND_FLUSH_BENCHMARK queued=4096 firstFlush=256 remainingAfterFirst=3840 budgetStops=2`.
+The streamlined current gates pass 64/64 root TypeScript tests, 26/26 WebView Host .NET tests, and 84/84 Unity EditMode tests. The 14/14 LittleCubes and 36/36 name-to-shop adapter counts are a 2026-08-30 conversion snapshot, not part of the default source gate.
 
-Current source validation passed 75/75 root TypeScript tests, 28/28 WebView Host .NET tests, 14/14 LittleCubes adapter tests, 36/36 name-to-shop tests, and 107/107 Unity EditMode tests. The Unity XML is `unity-winding-verify-20260830/runtime-lifecycle-v2-editmode.xml` (89,476 bytes, SHA-256 `94765093F01404565A13B438729AB68DEEC34BFDD45E6F24D7FA16CE0460B6CF`).
+Run gates by ownership: TypeScript changes use `npm run build` plus `npm test`; Host changes add the .NET project; UPM Runtime/Editor/importer changes add Unity EditMode XML; Web Bridge lifecycle changes run only the affected reconnect mode; performance claims run the two transport benchmarks. Legacy conversion capture and Player fault injection remain explicit acceptance work, not an automatic full-suite dependency.
 
 For a real game, build with `build-web-unity`, start the Player with `-logFile`, wait for at least `ticks=240`, and compare the latest `THREE_UNITY_BRIDGE_PERF` marker. A valid built-in profile run has `writer=background`, `dropped=0`, `metadataFast>0`, `metadataFallback=0`, `maxFlush<=256`, bounded high-water marks, no protocol fallback, and both Player and WebView host still responding. `flushBudgetStops=0` is expected for normal low-volume profiles; a positive value is acceptable under an intentional burst when the backlog drains without drops.
 
@@ -183,13 +183,13 @@ The current `name-to-shop` Player exercises three independent physical failures 
 - pre-connect suspension beyond the 10-second connection deadline: `connect-timeout` followed by the same zero-process/relaunch/readiness recovery;
 - a one-shot post-connect delay beyond the 20-second page-ready deadline: no page or logic ready is allowed before `page-ready-timeout`, then the old retained Host handle exits and the Job zero fence precedes relaunch.
 
-All three runs observed `MaxConcurrentHostsObserved=1`, `OrphanHost=False`, zero reliable backpressure/drop markers, no cleanup timeout, and no fatal Host diagnostic. Their logs and SHA-256 values are:
+All three runs observed `MaxConcurrentHostsObserved=1`, `OrphanHost=False`, zero reliable backpressure/drop markers, no cleanup timeout, and no fatal Host diagnostic. Their logs are:
 
-- `NameToShopLogicBridge-HostKill-document-job-v2.log`: `59A4BEF07B9B65ACE80285345F00E024FEC0CD07DA3A341ADCD3F73F546D7B25`
-- `NameToShopLogicBridge-ConnectTimeout-document-job-v2.log`: `1592E44CDAE9D9AA8328DE5D172546321FFA8251B929849D41D7D383E2106206`
-- `NameToShopLogicBridge-PageReadyTimeout-document-job-v2.log`: `F52A4050C637670572136A817FAFB94D6D769B06F3F515FCAA6F2178404659C8`
+- `NameToShopLogicBridge-HostKill-document-job-v2.log`
+- `NameToShopLogicBridge-ConnectTimeout-document-job-v2.log`
+- `NameToShopLogicBridge-PageReadyTimeout-document-job-v2.log`
 
-The command/state `shop-flight-v1` logical restart uses `-SkipInputStale` because it has no retained movement-input freshness gate. It still requires ready → session restart → new ready → lifecycle ACK → later tick and all process/failure checks. The current log is `NameToShopLogicBridge-RuntimeLifecycle-v2.log`, SHA-256 `2D48BAF276DB2C3E5159042BF3DD55A82E28038D7A74EB4F0FB4F33B9D7D3BFC`.
+The command/state `shop-flight-v1` logical restart uses `-SkipInputStale` because it has no retained movement-input freshness gate. It still requires ready → session restart → new ready → lifecycle ACK → later tick and all process/failure checks. The current log is `NameToShopLogicBridge-RuntimeLifecycle-v2.log`.
 
 ### Earlier fallback and shutdown baseline
 

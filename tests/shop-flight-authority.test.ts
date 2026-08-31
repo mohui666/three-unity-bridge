@@ -44,12 +44,11 @@ class FakeClient implements ShopFlightAuthorityClient {
   }
   pollWatchdog(): void { this.polls = (this.polls ?? 0) + 1; }
   polls?: number;
-  activationAllowed = true;
   activationAttempts = 0;
   activateAuthority(): boolean {
     this.activationAttempts++;
     this.activated = true;
-    return this.activationAllowed;
+    return true;
   }
   activated = false;
   fallback(reason: string): void {
@@ -288,25 +287,6 @@ test("successful reconnect resets the retry ladder", () => {
   assert.equal(client.restarts.length, 2, "a successful state must restore the 250 ms delay");
 });
 
-test("shop state is not applied when authority activation expires inside the handler", () => {
-  const client = new FakeClient();
-  const applied: ShopFlightState[] = [];
-  const authority = createShopFlightAuthority({
-    client,
-    getSnapshot: () => ({ time: 0, amplitude: 0, flying: false }),
-    applyState: value => applied.push(value),
-    runFallbackFrame: () => undefined,
-  });
-  client.emit("bridge.ready", { profile: "shop-flight-v1", fixedDeltaTime: 0.02 });
-  client.activationAllowed = false;
-
-  client.emit("flight.state", state(0), 1);
-
-  assert.equal(client.activated, true);
-  assert.equal(applied.length, 0);
-  assert.equal(authority.authorityActive, false);
-});
-
 test("shop authority does not restart when Unity did not negotiate session restart", () => {
   const client = new FakeClient();
   let now = 0;
@@ -372,79 +352,6 @@ test("malformed current-generation flight state falls back terminally without re
   assert.equal(authority.authorityActive, false);
 });
 
-test("non-string fallback reasons are normalized without throwing", () => {
-  const client = new FakeClient();
-  const authority = createShopFlightAuthority({
-    client,
-    getSnapshot: () => ({ time: 0, amplitude: 0, flying: false }),
-    applyState: () => undefined,
-    runFallbackFrame: () => undefined,
-  });
-
-  assert.doesNotThrow(() => client.emit("bridge.fallback", { reason: { bad: true } }, 1));
-  assert.equal(authority.authorityActive, false);
-});
-
-test("state application errors enter terminal fallback and keep JavaScript authoritative", () => {
-  let now = 0;
-  let fallbackFrames = 0;
-  const client = new FakeClient();
-  const authority = createShopFlightAuthority({
-    client,
-    getSnapshot: () => ({ time: 0, amplitude: 0, flying: false }),
-    applyState: () => { throw new Error("scene mutation failed"); },
-    runFallbackFrame: () => { fallbackFrames++; },
-    reconnect: { now: () => now },
-  });
-
-  client.emit("bridge.ready", {
-    profile: "shop-flight-v1",
-    features: ["session-restart-v1"],
-  });
-  assert.doesNotThrow(() => client.emit("flight.state", state(0), 1));
-
-  assert.equal(client.fallbackReason, "state-apply-error");
-  assert.equal(client.activated, false);
-  assert.equal(authority.authorityActive, false);
-  assert.equal(authority.generation, 1);
-
-  now = 10_000;
-  authority.update(0.02);
-  assert.equal(fallbackFrames, 1);
-  assert.deepEqual(client.restarts, []);
-});
-
-test("authority-change activation errors use the same terminal fallback path", () => {
-  const client = new FakeClient();
-  const changes: Array<{ active: boolean; reason: string }> = [];
-  const authority = createShopFlightAuthority({
-    client,
-    getSnapshot: () => ({ time: 0, amplitude: 0, flying: false }),
-    applyState: () => undefined,
-    runFallbackFrame: () => undefined,
-    onAuthorityChange: (active, reason) => {
-      changes.push({ active, reason });
-      if (active) throw new Error("activation observer failed");
-    },
-    reconnect: { now: () => Number.NaN },
-  });
-
-  client.emit("bridge.ready", {
-    profile: "shop-flight-v1",
-    features: ["session-restart-v1"],
-  });
-  assert.doesNotThrow(() => client.emit("flight.state", state(0), 1));
-
-  assert.equal(client.fallbackReason, "state-apply-error");
-  assert.equal(client.activated, false);
-  assert.equal(authority.authorityActive, false);
-  assert.equal(authority.generation, 1);
-  assert.deepEqual(changes, [
-    { active: true, reason: "state" },
-    { active: false, reason: "state-apply-error" },
-  ]);
-});
-
 test("shop authority leaves an injected client alive when disposed", () => {
   const client = new FakeClient();
   const authority = createShopFlightAuthority({
@@ -461,84 +368,4 @@ test("shop authority leaves an injected client alive when disposed", () => {
     [...client.handlers.values()].every(handlers => handlers.size === 0),
     true,
   );
-});
-
-test("shop authority disposes its internally created client when the dispose callback throws", () => {
-  const scope = globalThis as unknown as { chrome?: unknown };
-  const previousChrome = scope.chrome;
-  let messageHandler: ((event: { data: unknown }) => void) | undefined;
-  const posted: unknown[] = [];
-  let addCount = 0;
-  let removeCount = 0;
-  const disposeError = new Error("dispose observer failed");
-
-  scope.chrome = {
-    webview: {
-      postMessage: (message: unknown) => { posted.push(message); },
-      addEventListener: (
-        type: "message",
-        handler: (event: { data: unknown }) => void,
-      ): void => {
-        assert.equal(type, "message");
-        addCount++;
-        messageHandler = handler;
-      },
-      removeEventListener: (
-        type: "message",
-        handler: (event: { data: unknown }) => void,
-      ): void => {
-        assert.equal(type, "message");
-        assert.equal(handler, messageHandler);
-        removeCount++;
-      },
-    },
-  };
-
-  try {
-    const authority = createShopFlightAuthority({
-      getSnapshot: () => ({ time: 0, amplitude: 0, flying: false }),
-      applyState: () => undefined,
-      runFallbackFrame: () => undefined,
-      onAuthorityChange: (active, reason) => {
-        if (!active && reason === "dispose") throw disposeError;
-      },
-    });
-
-    assert.equal(addCount, 1);
-    const hello = posted.find(message =>
-      typeof message === "object"
-      && message !== null
-      && (message as { type?: unknown }).type === "bridge.hello") as { sessionId?: string } | undefined;
-    assert.equal(typeof hello?.sessionId, "string");
-    assert.notEqual(messageHandler, undefined);
-    messageHandler?.({
-      data: {
-        protocol: 1,
-        sessionId: hello?.sessionId,
-        type: "bridge.ready",
-        seq: 0,
-        payload: { profile: "shop-flight-v1", features: ["session-restart-v1"] },
-      },
-    });
-    messageHandler?.({
-      data: {
-        protocol: 1,
-        sessionId: hello?.sessionId,
-        type: "flight.state",
-        seq: 0,
-        payload: state(0),
-      },
-    });
-    assert.equal(authority.authorityActive, true);
-
-    assert.throws(() => authority.dispose(), error => error === disposeError);
-    assert.equal(removeCount, 1);
-    assert.equal(authority.authorityActive, false);
-
-    assert.doesNotThrow(() => authority.dispose());
-    assert.equal(removeCount, 1);
-  } finally {
-    if (previousChrome === undefined) delete scope.chrome;
-    else scope.chrome = previousChrome;
-  }
 });

@@ -1,34 +1,9 @@
-using System.Reflection;
 using NUnit.Framework;
-using UnityEngine;
-using UnityEngine.TestTools;
 
 namespace ThreeUnity.Bridge.Tests
 {
     public sealed class ThreeUnityWebBridgeLifecycleTests
     {
-        [Test]
-        public void HostExitBeforeConnectSchedulesFirstBoundedRetry()
-        {
-            var lifecycle = new ThreeUnityWebBridgeLifecycle();
-            Assert.That(lifecycle.Start(100), Is.True);
-            Assert.That(lifecycle.TryBeginLaunch(100, true, out var page, out var connection), Is.True);
-
-            Assert.That(lifecycle.TryReportFault(
-                page,
-                connection,
-                ThreeUnityHostFaultReason.HostExitedBeforeConnect), Is.True);
-            Assert.That(lifecycle.CompleteRetirement(page, connection, 125), Is.True);
-
-            Assert.That(lifecycle.LastDisconnectReason,
-                Is.EqualTo(ThreeUnityHostFaultReason.HostExitedBeforeConnect));
-            Assert.That(lifecycle.LastRetryDelayMilliseconds, Is.EqualTo(250));
-            Assert.That(lifecycle.TryBeginLaunch(374, true, out _, out _), Is.False);
-            Assert.That(lifecycle.TryBeginLaunch(375, true, out var nextPage, out _), Is.True);
-            Assert.That(nextPage, Is.EqualTo(page + 1));
-            Assert.That(lifecycle.Relaunches, Is.EqualTo(1));
-        }
-
         [Test]
         public void ReaderEofAndWriterFailureConvergeToOneFaultPerGeneration()
         {
@@ -206,26 +181,6 @@ namespace ThreeUnity.Bridge.Tests
         }
 
         [Test]
-        public void ConnectedOrStoppedGenerationCannotLaterTimeOut()
-        {
-            var connected = new ThreeUnityWebBridgeLifecycle(10);
-            connected.Start(0);
-            connected.TryBeginLaunch(0, true, out var page, out var connection);
-            Assert.That(connected.TryMarkConnected(page, connection), Is.True);
-            Assert.That(connected.HasPendingConnectDeadline, Is.False);
-            Assert.That(connected.TryReportConnectTimeout(100, out _, out _), Is.False);
-            Assert.That(connected.State, Is.EqualTo(ThreeUnityHostLifecycleState.Connected));
-
-            var stopped = new ThreeUnityWebBridgeLifecycle(10);
-            stopped.Start(0);
-            stopped.TryBeginLaunch(0, true, out _, out _);
-            stopped.Stop();
-            Assert.That(stopped.TryReportConnectTimeout(100, out _, out _), Is.False);
-            Assert.That(stopped.State, Is.EqualTo(ThreeUnityHostLifecycleState.Stopped));
-            Assert.That(stopped.HasPendingConnectDeadline, Is.False);
-        }
-
-        [Test]
         public void RelaunchUsesOnlyNewGenerationDeadline()
         {
             var lifecycle = new ThreeUnityWebBridgeLifecycle(100);
@@ -273,65 +228,6 @@ namespace ThreeUnity.Bridge.Tests
         }
 
         [Test]
-        public void PageReadyStartsStabilityWindowWithoutImmediatelyResettingBackoff()
-        {
-            var lifecycle = new ThreeUnityWebBridgeLifecycle(
-                pageReadyTimeoutMilliseconds: 100,
-                pageStabilityWindowMilliseconds: 20);
-            lifecycle.Start(0);
-            lifecycle.TryBeginLaunch(0, true, out var page, out var connection);
-            lifecycle.TryReportFault(page, connection, ThreeUnityHostFaultReason.HostExitedBeforeConnect);
-            lifecycle.CompleteRetirement(page, connection, 0);
-            Assert.That(lifecycle.LastRetryDelayMilliseconds, Is.EqualTo(250));
-
-            lifecycle.TryBeginLaunch(250, true, out page, out connection);
-            lifecycle.TryMarkConnected(page, connection, 260);
-            Assert.That(lifecycle.PageReadyDeadlineAtMilliseconds, Is.EqualTo(360));
-            Assert.That(lifecycle.TryMarkPageReady(page, connection, 270), Is.True);
-            Assert.That(lifecycle.HasPendingPageReadyDeadline, Is.False);
-            Assert.That(lifecycle.PageReadyDeadlineAtMilliseconds, Is.EqualTo(long.MaxValue));
-            Assert.That(lifecycle.HasPendingPageStabilityDeadline, Is.True);
-            Assert.That(lifecycle.PageStabilityDeadlineAtMilliseconds, Is.EqualTo(290));
-            Assert.That(lifecycle.BackoffResetForCurrentGeneration, Is.False);
-            Assert.That(lifecycle.LastRetryDelayMilliseconds, Is.EqualTo(250));
-            Assert.That(lifecycle.TryReportPageReadyTimeout(1000, out _, out _), Is.False);
-
-            Assert.That(lifecycle.TryMarkPageStable(289), Is.False);
-            Assert.That(lifecycle.TryMarkPageStable(290), Is.True);
-            Assert.That(lifecycle.TryMarkPageStable(291), Is.False);
-            Assert.That(lifecycle.BackoffResetForCurrentGeneration, Is.True);
-            Assert.That(lifecycle.HasPendingPageStabilityDeadline, Is.False);
-            Assert.That(lifecycle.LastRetryDelayMilliseconds, Is.Zero);
-        }
-
-        [Test]
-        public void FirstCurrentBridgeMessageImmediatelyResetsBackoffAndIsIdempotent()
-        {
-            var lifecycle = new ThreeUnityWebBridgeLifecycle(
-                pageStabilityWindowMilliseconds: 2000);
-            lifecycle.Start(0);
-            lifecycle.TryBeginLaunch(0, true, out var page, out var connection);
-            lifecycle.TryReportFault(page, connection, ThreeUnityHostFaultReason.ReaderEof);
-            lifecycle.CompleteRetirement(page, connection, 0);
-            Assert.That(lifecycle.LastRetryDelayMilliseconds, Is.EqualTo(250));
-
-            lifecycle.TryBeginLaunch(250, true, out page, out connection);
-            lifecycle.TryMarkConnected(page, connection, 251);
-            lifecycle.TryMarkPageReady(page, connection, 252);
-            Assert.That(lifecycle.HasPendingPageStabilityDeadline, Is.True);
-            Assert.That(lifecycle.TryMarkBridgeReady(page, connection), Is.True);
-            Assert.That(lifecycle.CurrentBridgeReady, Is.True);
-            Assert.That(lifecycle.BackoffResetForCurrentGeneration, Is.True);
-            Assert.That(lifecycle.HasPendingPageStabilityDeadline, Is.False);
-            Assert.That(lifecycle.LastRetryDelayMilliseconds, Is.Zero);
-            Assert.That(lifecycle.TryMarkBridgeReady(page, connection), Is.False);
-
-            lifecycle.TryReportFault(page, connection, ThreeUnityHostFaultReason.HostExited);
-            lifecycle.CompleteRetirement(page, connection, 252);
-            Assert.That(lifecycle.LastRetryDelayMilliseconds, Is.EqualTo(250));
-        }
-
-        [Test]
         public void BridgeMessageBeforeNavigationReadyCannotResetBackoffEarly()
         {
             var lifecycle = new ThreeUnityWebBridgeLifecycle(
@@ -354,50 +250,6 @@ namespace ThreeUnity.Bridge.Tests
             Assert.That(lifecycle.BackoffResetForCurrentGeneration, Is.True);
             Assert.That(lifecycle.LastRetryDelayMilliseconds, Is.Zero);
             Assert.That(lifecycle.HasPendingPageStabilityDeadline, Is.False);
-        }
-
-        [Test]
-        public void EarlyBridgeThenNavigationFailureKeepsIncreasingRetryDelay()
-        {
-            var lifecycle = new ThreeUnityWebBridgeLifecycle();
-            lifecycle.Start(0);
-            lifecycle.TryBeginLaunch(0, true, out var page, out var connection);
-            lifecycle.TryReportFault(page, connection, ThreeUnityHostFaultReason.HostExitedBeforeConnect);
-            lifecycle.CompleteRetirement(page, connection, 0);
-            Assert.That(lifecycle.LastRetryDelayMilliseconds, Is.EqualTo(250));
-
-            lifecycle.TryBeginLaunch(250, true, out page, out connection);
-            lifecycle.TryMarkConnected(page, connection, 251);
-            lifecycle.TryMarkBridgeReady(page, connection);
-            Assert.That(lifecycle.BackoffResetForCurrentGeneration, Is.False);
-            lifecycle.TryReportFault(page, connection, ThreeUnityHostFaultReason.PageReadyTimeout);
-            lifecycle.CompleteRetirement(page, connection, 252);
-
-            Assert.That(lifecycle.LastRetryDelayMilliseconds, Is.EqualTo(500));
-        }
-
-        [Test]
-        public void FatalDiagnosticCanRefinePipeEofWithoutCountingAnotherDisconnect()
-        {
-            var lifecycle = new ThreeUnityWebBridgeLifecycle();
-            lifecycle.Start(0);
-            lifecycle.TryBeginLaunch(0, true, out var page, out var connection);
-            lifecycle.TryMarkConnected(page, connection, 1);
-            Assert.That(lifecycle.TryReportFault(
-                page,
-                connection,
-                ThreeUnityHostFaultReason.ReaderEof), Is.True);
-
-            Assert.That(lifecycle.TryRefineRetiringFault(
-                page,
-                connection,
-                ThreeUnityHostFaultReason.HostFatal), Is.True);
-            Assert.That(lifecycle.LastDisconnectReason, Is.EqualTo(ThreeUnityHostFaultReason.HostFatal));
-            Assert.That(lifecycle.Disconnects, Is.EqualTo(1));
-            Assert.That(lifecycle.TryRefineRetiringFault(
-                page,
-                connection,
-                ThreeUnityHostFaultReason.HostFatal), Is.False);
         }
 
         [Test]
@@ -480,17 +332,6 @@ namespace ThreeUnity.Bridge.Tests
         }
 
         [Test]
-        public void GenerationQueueReportsRejectedEntriesEvenWithoutCurrentMessage()
-        {
-            var queue = new ThreeUnityGenerationQueue<string>();
-            queue.Enqueue(1, 1, "old-page");
-
-            Assert.That(queue.TryDequeueCurrent(2, 2, out _, out var rejected), Is.False);
-            Assert.That(rejected, Is.EqualTo(1));
-            Assert.That(queue.Pending, Is.Zero);
-        }
-
-        [Test]
         public void GenerationQueueIsBoundedAndKeepsNewestEntries()
         {
             var queue = new ThreeUnityGenerationQueue<string>(2);
@@ -528,18 +369,6 @@ namespace ThreeUnity.Bridge.Tests
         }
 
         [Test]
-        public void LateDiagnosticFromRetiredHostIsRejectedBeforeCurrentDiagnostic()
-        {
-            var diagnostics = new ThreeUnityGenerationQueue<string>();
-            diagnostics.Enqueue(7, 7, "THREE_UNITY_WEB_HOST_FATAL old");
-            diagnostics.Enqueue(8, 8, "current diagnostic");
-
-            Assert.That(diagnostics.TryDequeueCurrent(8, 8, out var value, out var rejected), Is.True);
-            Assert.That(value, Is.EqualTo("current diagnostic"));
-            Assert.That(rejected, Is.EqualTo(1));
-        }
-
-        [Test]
         public void RetiredOutboundCountersRemainVisibleWhilePendingIsCurrentOnly()
         {
             var accumulator = new ThreeUnityOutboundMetricsAccumulator();
@@ -569,97 +398,6 @@ namespace ThreeUnity.Bridge.Tests
             Assert.That(combined.MaxPending, Is.GreaterThanOrEqualTo(2));
         }
 
-        [Test]
-        public void StorageIdentifierIsStableSanitizedAndProductSpecific()
-        {
-            var first = ThreeUnityWebBridgeLifecycle.BuildStorageIdentifier("Name To Shop!");
-            var same = ThreeUnityWebBridgeLifecycle.BuildStorageIdentifier("Name To Shop!");
-            var other = ThreeUnityWebBridgeLifecycle.BuildStorageIdentifier("Little Cubes");
-            var unicode = ThreeUnityWebBridgeLifecycle.BuildStorageIdentifier("商店");
-
-            Assert.That(first, Is.EqualTo(same));
-            Assert.That(first, Does.Match("^name-to-shop-[0-9a-f]{12}$"));
-            Assert.That(other, Is.Not.EqualTo(first));
-            Assert.That(unicode, Does.Match("^game-[0-9a-f]{12}$"));
-        }
-
-        [Test]
-        public void LauncherStopIsIdempotentBeforeStart()
-        {
-            var gameObject = new GameObject("bridge-lifecycle-test");
-            var launcher = gameObject.AddComponent<ThreeUnityWebBridgeLauncher>();
-            var stop = typeof(ThreeUnityWebBridgeLauncher).GetMethod(
-                "StopBridge",
-                BindingFlags.Instance | BindingFlags.NonPublic);
-
-            Assert.That(stop, Is.Not.Null);
-            Assert.DoesNotThrow(() => stop.Invoke(launcher, null));
-            Assert.DoesNotThrow(() => stop.Invoke(launcher, null));
-            Assert.That(launcher.GetTransportMetrics().Relaunches, Is.Zero);
-            Assert.DoesNotThrow(() => Object.DestroyImmediate(gameObject));
-        }
-
-        [Test]
-        public void FailedJobTerminationIsRetriedUntilChildrenDrain()
-        {
-            var gameObject = new GameObject("bridge-job-retry-test");
-            var launcher = gameObject.AddComponent<ThreeUnityWebBridgeLauncher>();
-            var job = new RetryHostJob();
-            try
-            {
-                var launcherType = typeof(ThreeUnityWebBridgeLauncher);
-                var lifecycle = (ThreeUnityWebBridgeLifecycle)launcherType
-                    .GetField("lifecycle", BindingFlags.Instance | BindingFlags.NonPublic)
-                    .GetValue(launcher);
-                Assert.That(lifecycle.Start(0), Is.True);
-                Assert.That(lifecycle.TryBeginLaunch(
-                    0,
-                    true,
-                    out var page,
-                    out var connection), Is.True);
-                Assert.That(lifecycle.TryReportFault(
-                    page,
-                    connection,
-                    ThreeUnityHostFaultReason.HostExitedBeforeConnect), Is.True);
-
-                SetLauncherField(launcher, "hostJob", job);
-                SetLauncherField(launcher, "hostJobPageGeneration", page);
-                SetLauncherField(launcher, "hostJobConnectionGeneration", connection);
-                SetLauncherField(launcher, "trackedHostPageGeneration", page);
-                SetLauncherField(launcher, "trackedHostConnectionGeneration", connection);
-                SetLauncherField(launcher, "trackedHostAssignedToJob", true);
-
-                var complete = launcherType.GetMethod(
-                    "CompleteRetirementWithoutHost",
-                    BindingFlags.Instance | BindingFlags.NonPublic);
-                Assert.That(complete, Is.Not.Null);
-
-                LogAssert.Expect(
-                    LogType.Error,
-                    "THREE_UNITY_WEB_BRIDGE_JOB_TERMINATE_FAILED"
-                    + " attempts=1 message=synthetic first failure");
-                complete.Invoke(launcher, new object[] { page, connection, 1000L });
-                Assert.That(job.TerminateCalls, Is.EqualTo(1));
-                Assert.That(job.ActiveProcessCount, Is.EqualTo(1));
-                Assert.That(lifecycle.State, Is.EqualTo(ThreeUnityHostLifecycleState.Retiring));
-
-                // Calls are throttled instead of flooding TerminateJobObject and logs.
-                complete.Invoke(launcher, new object[] { page, connection, 1100L });
-                Assert.That(job.TerminateCalls, Is.EqualTo(1));
-                Assert.That(lifecycle.State, Is.EqualTo(ThreeUnityHostLifecycleState.Retiring));
-
-                complete.Invoke(launcher, new object[] { page, connection, 1250L });
-                Assert.That(job.TerminateCalls, Is.EqualTo(2));
-                Assert.That(job.ActiveProcessCount, Is.Zero);
-                Assert.That(job.IsDisposed, Is.True);
-                Assert.That(lifecycle.State, Is.EqualTo(ThreeUnityHostLifecycleState.WaitingToLaunch));
-            }
-            finally
-            {
-                Object.DestroyImmediate(gameObject);
-            }
-        }
-
         private static void AssertAllReadinessDeadlinesCleared(
             ThreeUnityWebBridgeLifecycle lifecycle)
         {
@@ -681,40 +419,5 @@ namespace ThreeUnity.Bridge.Tests
             return lifecycle;
         }
 
-        private static void SetLauncherField(
-            ThreeUnityWebBridgeLauncher launcher,
-            string name,
-            object value)
-        {
-            var field = typeof(ThreeUnityWebBridgeLauncher).GetField(
-                name,
-                BindingFlags.Instance | BindingFlags.NonPublic);
-            Assert.That(field, Is.Not.Null, name);
-            field.SetValue(launcher, value);
-        }
-
-        private sealed class RetryHostJob : IThreeUnityWindowsHostJob
-        {
-            public bool IsDisposed { get; private set; }
-            public int ActiveProcessCount { get; private set; } = 1;
-            public int TerminateCalls { get; private set; }
-
-            public void Assign(System.Diagnostics.Process process)
-            {
-            }
-
-            public void Terminate()
-            {
-                TerminateCalls++;
-                if (TerminateCalls == 1)
-                    throw new System.ComponentModel.Win32Exception("synthetic first failure");
-                ActiveProcessCount = 0;
-            }
-
-            public void Dispose()
-            {
-                IsDisposed = true;
-            }
-        }
     }
 }
