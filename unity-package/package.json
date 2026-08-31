@@ -33,6 +33,11 @@
       "displayName": "Morph Target Animation",
       "description": "Imports two morph targets as Unity BlendShapes and plays a looping morph-weight animation.",
       "path": "Samples~/Morph Target Animation"
+    },
+    {
+      "displayName": "Material UV Animation",
+      "description": "Plays looping base color, emission, opacity, roughness, and base-map UV animation through MaterialPropertyBlock bindings.",
+      "path": "Samples~/Material UV Animation"
     }
   ]
 }

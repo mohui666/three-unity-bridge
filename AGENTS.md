@@ -14,9 +14,8 @@ This repository builds a reusable Three.js-to-Unity bridge. Preserve the origina
 - `examples/`: minimal exporter and reusable browser-side logic adapters.
 - `benchmarks/`: deterministic transport and collision benchmarks.
 - `conversion-tools/`: repeatable capture and physical recovery harnesses.
-- `conversions/`: checked-in conversion fixtures and evidence reports. Large `.threeunity` files here are intentional release/test artifacts, not Unity cache files.
 - `docs/`: architecture, protocol, performance, and validation notes.
-- `conversion-work/`, `unity-smoke/`, and `unity-winding-verify*/`: ignored local workspaces. They may contain upstream clones or generated Unity projects; never stage them.
+- `conversion-work/`, `conversions/`, `unity-smoke/`, and `unity-winding-verify*/`: ignored local validation workspaces and generated evidence. They may contain upstream clones, converted samples, reports, or generated Unity projects; never stage them.
 
 ## Non-negotiable invariants
 
@@ -78,6 +77,6 @@ For Web Bridge lifecycle or packaging changes, also:
 
 ## Documentation and evidence
 
-- Update `README.md`, `docs/BRIDGE_PERFORMANCE.md`, `unity-package/CHANGELOG.md`, and the relevant `conversions/*/RESULTS.md` when behavior or verified evidence changes.
+- Update `README.md`, `docs/BRIDGE_PERFORMANCE.md`, `unity-package/CHANGELOG.md`, and other tracked documentation when behavior or verified evidence changes. Keep per-game conversion samples and reports under ignored local paths.
 - Record exact commands, Unity/.NET/Node versions, test counts, and important log markers.
 - Label manual observations, automated assertions, benchmark results, and unresolved limitations accurately. Do not present an unverified assumption as a completed feature.

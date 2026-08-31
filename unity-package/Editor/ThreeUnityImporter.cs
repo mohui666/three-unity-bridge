@@ -8,7 +8,7 @@ using UnityEngine.Rendering;
 
 namespace ThreeUnity.Bridge.Editor
 {
-    [ScriptedImporter(7, "threeunity")]
+    [ScriptedImporter(8, "threeunity")]
     public sealed class ThreeUnityImporter : ScriptedImporter
     {
         [SerializeField] private bool importCameras = true;
@@ -28,17 +28,18 @@ namespace ThreeUnity.Bridge.Editor
                 return;
             }
 
-            if (document == null || document.format != "three-unity-scene" || (document.version != 1 && document.version != 2 && document.version != 3))
+            if (document == null || document.format != "three-unity-scene" || (document.version != 1 && document.version != 2 && document.version != 3 && document.version != 4))
             {
-                context.LogImportError("Unsupported document. Expected three-unity-scene format version 1, 2, or 3.");
+                context.LogImportError("Unsupported document. Expected three-unity-scene format version 1, 2, 3, or 4.");
                 return;
             }
 
             var root = new GameObject(string.IsNullOrEmpty(document.name) ? Path.GetFileNameWithoutExtension(context.assetPath) : document.name);
             AttachRuntimeProfile(root, document.runtime);
             if (HasComponentDescriptors(document.nodes)) root.AddComponent<ThreeUnityComponentApplicator>();
-            var textures = ImportTextures(context, document.textures ?? Array.Empty<TextureRecord>());
-            var materials = ImportMaterials(context, document.materials ?? Array.Empty<MaterialRecord>(), textures);
+            var materialCapabilities = IndexMaterialAnimationCapabilities(document);
+            var textures = ImportTextures(context, document.textures ?? Array.Empty<TextureRecord>(), document.version);
+            var materials = ImportMaterials(context, document.materials ?? Array.Empty<MaterialRecord>(), textures, materialCapabilities);
             var meshes = ImportMeshes(context, document.meshes ?? Array.Empty<MeshRecord>(), document.unitScaleMeters);
             var skins = IndexSkins(document.skins ?? Array.Empty<SkinRecord>());
             var objects = new Dictionary<string, GameObject>();
@@ -78,9 +79,18 @@ namespace ThreeUnity.Bridge.Editor
             if (document.version >= 2)
             {
                 var animationRecords = document.animations ?? Array.Empty<AnimationRecord>();
-                var clips = ImportAnimations(context, root, objects, animationRecords, document.unitScaleMeters);
+                var clips = ImportAnimations(
+                    context,
+                    root,
+                    objects,
+                    animationRecords,
+                    document.nodes ?? Array.Empty<NodeRecord>(),
+                    document.meshes ?? Array.Empty<MeshRecord>(),
+                    document.materials ?? Array.Empty<MaterialRecord>(),
+                    document.unitScaleMeters,
+                    out var materialAnimationClips);
+                AttachAnimationPlayer(root, clips, animationRecords, document.defaultAnimationId, document.autoplayAnimation, materialAnimationClips);
                 ApplyAnimatedBounds(root, clips.Values);
-                AttachAnimationPlayer(root, clips, animationRecords, document.defaultAnimationId, document.autoplayAnimation);
             }
 
             foreach (var warning in document.warnings ?? Array.Empty<string>()) context.LogImportWarning(warning);
@@ -123,6 +133,51 @@ namespace ThreeUnity.Bridge.Editor
             return result;
         }
 
+        private static Dictionary<string, MaterialAnimationCapabilities> IndexMaterialAnimationCapabilities(SceneDocument document)
+        {
+            var result = new Dictionary<string, MaterialAnimationCapabilities>();
+            if (document.version < 4) return result;
+
+            var nodes = new Dictionary<string, NodeRecord>();
+            foreach (var node in document.nodes ?? Array.Empty<NodeRecord>()) nodes.Add(node.id, node);
+            var meshes = new Dictionary<string, MeshRecord>();
+            foreach (var mesh in document.meshes ?? Array.Empty<MeshRecord>()) meshes.Add(mesh.id, mesh);
+
+            foreach (var animation in document.animations ?? Array.Empty<AnimationRecord>())
+            foreach (var track in animation.tracks ?? Array.Empty<AnimationTrackRecord>())
+            {
+                if (!IsMaterialAnimationProperty(track.property)) continue;
+                if (!nodes.TryGetValue(track.targetNodeId, out var node) ||
+                    string.IsNullOrEmpty(node.meshId) ||
+                    !meshes.TryGetValue(node.meshId, out var mesh) ||
+                    mesh.materialIds == null ||
+                    track.materialIndex < 0 ||
+                    track.materialIndex >= mesh.materialIds.Length)
+                    continue;
+
+                var materialId = mesh.materialIds[track.materialIndex];
+                if (!result.TryGetValue(materialId, out var capabilities))
+                {
+                    capabilities = new MaterialAnimationCapabilities();
+                    result.Add(materialId, capabilities);
+                }
+                if (track.property == "materialEmissive") capabilities.emission = true;
+                if (track.property == "materialBaseColor")
+                {
+                    var values = track.values ?? Array.Empty<float>();
+                    for (var index = 3; index < values.Length; index += 4)
+                    {
+                        if (values[index] < 0.999f)
+                        {
+                            capabilities.transparent = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            return result;
+        }
+
         private static Dictionary<string, string> BuildImportedNodeNames(NodeRecord[] nodes, bool makeAnimationPathsSafe)
         {
             var result = new Dictionary<string, string>();
@@ -138,7 +193,7 @@ namespace ThreeUnity.Bridge.Editor
 
         private static string EscapeAnimationPathSegment(string value) => value.Replace("%", "%25").Replace("/", "%2F");
 
-        private Dictionary<string, Texture2D> ImportTextures(AssetImportContext context, TextureRecord[] records)
+        private Dictionary<string, Texture2D> ImportTextures(AssetImportContext context, TextureRecord[] records, int documentVersion)
         {
             var result = new Dictionary<string, Texture2D>();
             foreach (var record in records)
@@ -150,7 +205,7 @@ namespace ThreeUnity.Bridge.Editor
                     if (record.encoding == "rgba8")
                     {
                         texture = new Texture2D(Math.Max(1, record.width), Math.Max(1, record.height), TextureFormat.RGBA32, true);
-                        texture.LoadRawTextureData(Convert.FromBase64String(record.data));
+                        texture.SetPixelData(Convert.FromBase64String(record.data), 0);
                         texture.Apply(true, false);
                     }
                     else
@@ -161,6 +216,12 @@ namespace ThreeUnity.Bridge.Editor
                         if (!texture.LoadImage(Convert.FromBase64String(payload), false)) throw new InvalidDataException("Texture image decoder rejected data.");
                     }
                     texture.name = string.IsNullOrEmpty(record.name) ? record.id : record.name;
+                    if (documentVersion >= 4)
+                    {
+                        var textureName = string.IsNullOrEmpty(record.name) ? record.id : record.name;
+                        texture.wrapModeU = ReadTextureWrapMode(record.wrapS, textureName);
+                        texture.wrapModeV = ReadTextureWrapMode(record.wrapT, textureName);
+                    }
                     context.AddObjectToAsset(record.id, texture);
                     result[record.id] = texture;
                 }
@@ -172,7 +233,11 @@ namespace ThreeUnity.Bridge.Editor
             return result;
         }
 
-        private Dictionary<string, Material> ImportMaterials(AssetImportContext context, MaterialRecord[] records, Dictionary<string, Texture2D> textures)
+        private Dictionary<string, Material> ImportMaterials(
+            AssetImportContext context,
+            MaterialRecord[] records,
+            Dictionary<string, Texture2D> textures,
+            Dictionary<string, MaterialAnimationCapabilities> animationCapabilities)
         {
             var result = new Dictionary<string, Material>();
             foreach (var record in records)
@@ -188,21 +253,24 @@ namespace ThreeUnity.Bridge.Editor
                 SetColor(material, "_BaseColor", "_Color", color);
                 SetFloat(material, "_Metallic", record.metallic);
                 SetFloat(material, "_Smoothness", 1f - Mathf.Clamp01(record.roughness));
+                SetFloat(material, "_Glossiness", 1f - Mathf.Clamp01(record.roughness));
                 SetFloat(material, "_Cutoff", record.alphaCutoff);
                 SetFloat(material, "_Unlit", record.unlit ? 1f : 0f);
                 SetTexture(material, "_BaseMap", "_MainTex", record.baseColorTextureId, textures);
+                ApplyBaseMapST(material, ReadBaseMapST(record.baseColorTextureST));
                 if (!string.IsNullOrEmpty(record.normalTextureId) && textures.ContainsKey(record.normalTextureId))
                 {
                     material.EnableKeyword("_NORMALMAP");
                     SetTexture(material, "_BumpMap", "_BumpMap", record.normalTextureId, textures);
                 }
-                if (ReadColor(record.emissive, Color.black).maxColorComponent > 0f)
+                animationCapabilities.TryGetValue(record.id, out var capabilities);
+                if (ReadColor(record.emissive, Color.black).maxColorComponent > 0f || capabilities?.emission == true)
                 {
                     material.EnableKeyword("_EMISSION");
                     SetColor(material, "_EmissionColor", "_EmissionColor", ReadColor(record.emissive, Color.black));
                     SetTexture(material, "_EmissionMap", "_EmissionMap", record.emissiveTextureId, textures);
                 }
-                ConfigureSurface(material, record.transparent, record.doubleSided);
+                ConfigureSurface(material, record.transparent || capabilities?.transparent == true, record.doubleSided);
                 context.AddObjectToAsset(record.id, material);
                 result[record.id] = material;
             }
@@ -425,10 +493,22 @@ namespace ThreeUnity.Bridge.Editor
             GameObject root,
             Dictionary<string, GameObject> objects,
             AnimationRecord[] records,
-            float unitScale)
+            NodeRecord[] nodeRecords,
+            MeshRecord[] meshRecords,
+            MaterialRecord[] materialRecords,
+            float unitScale,
+            out ThreeUnityMaterialAnimationClip[] materialAnimationClips)
         {
             var result = new Dictionary<string, AnimationClip>();
             var usedNames = new HashSet<string>();
+            var importedMaterialClips = new List<ThreeUnityMaterialAnimationClip>();
+            var nodesById = new Dictionary<string, NodeRecord>();
+            foreach (var node in nodeRecords) nodesById.Add(node.id, node);
+            var meshesById = new Dictionary<string, MeshRecord>();
+            foreach (var mesh in meshRecords) meshesById.Add(mesh.id, mesh);
+            var materialsById = new Dictionary<string, MaterialRecord>();
+            foreach (var material in materialRecords) materialsById.Add(material.id, material);
+
             foreach (var record in records)
             {
                 var clipName = string.IsNullOrEmpty(record.name) ? record.id : record.name;
@@ -444,21 +524,131 @@ namespace ThreeUnity.Bridge.Editor
                     legacy = true,
                     wrapMode = record.loop ? WrapMode.Loop : WrapMode.Once,
                 };
+                var materialBindings = new List<ThreeUnityMaterialAnimationBinding>();
                 foreach (var track in record.tracks ?? Array.Empty<AnimationTrackRecord>())
                 {
                     if (!objects.TryGetValue(track.targetNodeId, out var target))
                         throw new InvalidDataException($"Animation '{record.id}' references missing target node '{track.targetNodeId}'.");
+                    if (IsMaterialAnimationProperty(track.property))
+                    {
+                        AddMaterialAnimationBindings(
+                            materialBindings,
+                            target,
+                            track,
+                            record,
+                            nodesById,
+                            meshesById,
+                            materialsById);
+                        continue;
+                    }
                     var path = AnimationUtility.CalculateTransformPath(target.transform, root.transform);
                     if (track.property == "morphWeight")
                         AttachMorphAnimationTrack(clip, path, target, track, record);
                     else
                         AttachAnimationTrack(clip, path, track, record.duration, record.loop, unitScale);
                 }
+                if (materialBindings.Count > 0)
+                {
+                    EnsureMaterialClockDuration(clip, record.duration, record.loop);
+                    importedMaterialClips.Add(new ThreeUnityMaterialAnimationClip
+                    {
+                        clipName = clipName,
+                        bindings = materialBindings.ToArray(),
+                    });
+                }
                 clip.EnsureQuaternionContinuity();
                 context.AddObjectToAsset(record.id, clip);
                 result.Add(record.id, clip);
             }
+            materialAnimationClips = importedMaterialClips.ToArray();
             return result;
+        }
+
+        private static void AddMaterialAnimationBindings(
+            List<ThreeUnityMaterialAnimationBinding> bindings,
+            GameObject target,
+            AnimationTrackRecord track,
+            AnimationRecord animation,
+            Dictionary<string, NodeRecord> nodesById,
+            Dictionary<string, MeshRecord> meshesById,
+            Dictionary<string, MaterialRecord> materialsById)
+        {
+            if (track.interpolation != "linear" || !track.baked)
+                throw new InvalidDataException($"Animation '{animation.id}' material track for node '{track.targetNodeId}' must be baked with linear interpolation.");
+            if (track.morphTargetIndex != -1)
+                throw new InvalidDataException($"Animation '{animation.id}' material track for node '{track.targetNodeId}' must use morphTargetIndex -1.");
+            if (!nodesById.TryGetValue(track.targetNodeId, out var node) || string.IsNullOrEmpty(node.meshId) || !meshesById.TryGetValue(node.meshId, out var mesh))
+                throw new InvalidDataException($"Animation '{animation.id}' material track targets node '{track.targetNodeId}' without a mesh.");
+            var materialIds = mesh.materialIds ?? Array.Empty<string>();
+            if (track.materialIndex < 0 || track.materialIndex >= materialIds.Length)
+                throw new InvalidDataException($"Animation '{animation.id}' material track targets node '{node.id}', mesh '{mesh.id}', source material index {track.materialIndex}, but the mesh has {materialIds.Length} source materials.");
+            var materialId = materialIds[track.materialIndex];
+            if (!materialsById.TryGetValue(materialId, out var material))
+                throw new InvalidDataException($"Animation '{animation.id}' material track targets node '{node.id}', mesh '{mesh.id}', source material index {track.materialIndex}, whose material '{materialId}' does not exist.");
+            if (track.property == "materialBaseMapST" && string.IsNullOrEmpty(material.baseColorTextureId))
+                throw new InvalidDataException($"Animation '{animation.id}' base-map ST track targets material '{materialId}' without a base color texture.");
+
+            var property = ReadMaterialAnimationProperty(track.property);
+            var componentCount = GetMaterialAnimationComponentCount(property);
+            var times = track.times ?? Array.Empty<float>();
+            var values = track.values ?? Array.Empty<float>();
+            if (times.Length == 0 || values.Length != times.Length * componentCount)
+                throw new InvalidDataException($"Animation '{animation.id}' material track '{track.property}' for node '{node.id}' has {values.Length} values for {times.Length} keys; expected {componentCount} values per key.");
+            for (var index = 0; index < times.Length; index++)
+            {
+                if (float.IsNaN(times[index]) || float.IsInfinity(times[index]) || (index > 0 && times[index] < times[index - 1]))
+                    throw new InvalidDataException($"Animation '{animation.id}' material track '{track.property}' for node '{node.id}' has invalid key time at index {index}.");
+            }
+            for (var index = 0; index < values.Length; index++)
+            {
+                if (float.IsNaN(values[index]) || float.IsInfinity(values[index]))
+                    throw new InvalidDataException($"Animation '{animation.id}' material track '{track.property}' for node '{node.id}' has a non-finite value at index {index}.");
+            }
+
+            var renderer = target.GetComponent<Renderer>();
+            if (renderer == null)
+                throw new InvalidDataException($"Animation '{animation.id}' material track targets node '{node.id}', mesh '{mesh.id}', source material index {track.materialIndex}, but the node has no Renderer.");
+            var actualSlotCount = renderer.sharedMaterials.Length;
+            var groups = mesh.groups ?? Array.Empty<MeshGroupRecord>();
+            var matchedSlots = new List<int>();
+            if (groups.Length == 0)
+            {
+                if (track.materialIndex == 0 && actualSlotCount > 0) matchedSlots.Add(0);
+            }
+            else
+            {
+                for (var groupIndex = 0; groupIndex < groups.Length; groupIndex++)
+                {
+                    if (groups[groupIndex].materialIndex == track.materialIndex && groupIndex < actualSlotCount)
+                        matchedSlots.Add(groupIndex);
+                }
+            }
+            if (matchedSlots.Count == 0)
+                throw new InvalidDataException($"Animation '{animation.id}' material track targets node '{node.id}', mesh '{mesh.id}', source material index {track.materialIndex}, which maps to no renderer slot among {actualSlotCount} slots.");
+
+            var initialValue = ReadInitialMaterialValue(material, property);
+            foreach (var materialSlot in matchedSlots)
+            {
+                bindings.Add(new ThreeUnityMaterialAnimationBinding
+                {
+                    renderer = renderer,
+                    materialSlot = materialSlot,
+                    property = property,
+                    times = times,
+                    values = values,
+                    initialValue = initialValue,
+                });
+            }
+        }
+
+        private static void EnsureMaterialClockDuration(AnimationClip clip, float duration, bool loop)
+        {
+            if (duration <= 0f || clip.length >= duration) return;
+            var curve = AnimationCurve.Linear(0f, 0f, duration, 0f);
+            curve.preWrapMode = loop ? WrapMode.Loop : WrapMode.Once;
+            curve.postWrapMode = loop ? WrapMode.Loop : WrapMode.Once;
+            var binding = EditorCurveBinding.FloatCurve(string.Empty, typeof(ThreeUnityAnimationPlayer), "materialAnimationClock");
+            AnimationUtility.SetEditorCurve(clip, binding, curve);
         }
 
         private static void AttachAnimationTrack(AnimationClip clip, string path, AnimationTrackRecord track, float duration, bool loop, float unitScale)
@@ -570,7 +760,8 @@ namespace ThreeUnity.Bridge.Editor
             Dictionary<string, AnimationClip> clipsById,
             AnimationRecord[] records,
             string defaultAnimationId,
-            bool autoplay)
+            bool autoplay,
+            ThreeUnityMaterialAnimationClip[] materialAnimationClips)
         {
             if (clipsById.Count == 0) return;
             var clips = new AnimationClip[records.Length];
@@ -585,7 +776,7 @@ namespace ThreeUnity.Bridge.Editor
                 defaultClipName = defaultClip.name;
                 foreach (var record in records) if (record.id == defaultAnimationId) { defaultLoop = record.loop; break; }
             }
-            root.AddComponent<ThreeUnityAnimationPlayer>().Initialize(clips, defaultClipName, autoplay, defaultLoop);
+            root.AddComponent<ThreeUnityAnimationPlayer>().Initialize(clips, defaultClipName, autoplay, defaultLoop, materialAnimationClips);
             var animationComponent = root.GetComponent<Animation>();
             animationComponent.playAutomatically = false;
             animationComponent.clip = defaultClip;
@@ -773,6 +964,106 @@ namespace ThreeUnity.Bridge.Editor
             else if (material.HasProperty(fallback)) material.SetTexture(fallback, texture);
         }
 
+        private static TextureWrapMode ReadTextureWrapMode(string value, string textureName)
+        {
+            switch (value)
+            {
+                case "repeat": return TextureWrapMode.Repeat;
+                case "clamp": return TextureWrapMode.Clamp;
+                case "mirror": return TextureWrapMode.Mirror;
+                default: throw new InvalidDataException($"Texture '{textureName}' uses unsupported wrap mode '{value}'.");
+            }
+        }
+
+        private static Vector4 ReadBaseMapST(float[] values)
+        {
+            if (values == null || values.Length == 0) return new Vector4(1f, 1f, 0f, 0f);
+            if (values.Length != 4)
+                throw new InvalidDataException($"Base color texture ST must contain exactly four values, but found {values.Length}.");
+            for (var index = 0; index < values.Length; index++)
+            {
+                if (float.IsNaN(values[index]) || float.IsInfinity(values[index]))
+                    throw new InvalidDataException($"Base color texture ST contains a non-finite value at index {index}.");
+            }
+            return new Vector4(values[0], values[1], values[2], values[3]);
+        }
+
+        private static void ApplyBaseMapST(Material material, Vector4 st)
+        {
+            st = ThreeUnityMaterialAnimationUtility.ConvertBaseMapST(st);
+            var scale = new Vector2(st.x, st.y);
+            var offset = new Vector2(st.z, st.w);
+            if (material.HasProperty("_BaseMap"))
+            {
+                material.SetTextureScale("_BaseMap", scale);
+                material.SetTextureOffset("_BaseMap", offset);
+            }
+            if (material.HasProperty("_MainTex"))
+            {
+                material.SetTextureScale("_MainTex", scale);
+                material.SetTextureOffset("_MainTex", offset);
+            }
+            if (material.HasProperty("_BaseMap_ST")) material.SetVector("_BaseMap_ST", st);
+            if (material.HasProperty("_MainTex_ST")) material.SetVector("_MainTex_ST", st);
+        }
+
+        private static bool IsMaterialAnimationProperty(string property)
+        {
+            return property == "materialBaseColor" ||
+                   property == "materialEmissive" ||
+                   property == "materialMetallic" ||
+                   property == "materialRoughness" ||
+                   property == "materialBaseMapST";
+        }
+
+        private static ThreeUnityMaterialAnimationProperty ReadMaterialAnimationProperty(string property)
+        {
+            switch (property)
+            {
+                case "materialBaseColor": return ThreeUnityMaterialAnimationProperty.BaseColor;
+                case "materialEmissive": return ThreeUnityMaterialAnimationProperty.Emissive;
+                case "materialMetallic": return ThreeUnityMaterialAnimationProperty.Metallic;
+                case "materialRoughness": return ThreeUnityMaterialAnimationProperty.Roughness;
+                case "materialBaseMapST": return ThreeUnityMaterialAnimationProperty.BaseMapST;
+                default: throw new InvalidDataException($"Unsupported material animation property '{property}'.");
+            }
+        }
+
+        private static int GetMaterialAnimationComponentCount(ThreeUnityMaterialAnimationProperty property)
+        {
+            switch (property)
+            {
+                case ThreeUnityMaterialAnimationProperty.BaseColor:
+                case ThreeUnityMaterialAnimationProperty.BaseMapST:
+                    return 4;
+                case ThreeUnityMaterialAnimationProperty.Emissive:
+                    return 3;
+                default:
+                    return 1;
+            }
+        }
+
+        private static Vector4 ReadInitialMaterialValue(MaterialRecord material, ThreeUnityMaterialAnimationProperty property)
+        {
+            switch (property)
+            {
+                case ThreeUnityMaterialAnimationProperty.BaseColor:
+                    var baseColor = ReadColor(material.baseColor, Color.white);
+                    return new Vector4(baseColor.r, baseColor.g, baseColor.b, baseColor.a);
+                case ThreeUnityMaterialAnimationProperty.Emissive:
+                    var emissive = ReadColor(material.emissive, Color.black);
+                    return new Vector4(emissive.r, emissive.g, emissive.b, 0f);
+                case ThreeUnityMaterialAnimationProperty.Metallic:
+                    return new Vector4(material.metallic, 0f, 0f, 0f);
+                case ThreeUnityMaterialAnimationProperty.Roughness:
+                    return new Vector4(material.roughness, 0f, 0f, 0f);
+                case ThreeUnityMaterialAnimationProperty.BaseMapST:
+                    return ReadBaseMapST(material.baseColorTextureST);
+                default:
+                    throw new InvalidDataException($"Unsupported material animation property '{property}'.");
+            }
+        }
+
         private static ThreeUnityComponentDescriptor[] ConvertComponents(ComponentRecord[] records)
         {
             if (records == null) return Array.Empty<ThreeUnityComponentDescriptor>();
@@ -913,13 +1204,14 @@ namespace ThreeUnity.Bridge.Editor
         [Serializable] private sealed class MeshGroupRecord { public int start; public int count; public int materialIndex; }
         [Serializable] private sealed class SkinRecord { public string id; public string name; public string meshNodeId; public string[] boneNodeIds; public string rootBoneNodeId; public float[] inverseBindMatrices; public float[] bindMatrix; }
         [Serializable] private sealed class AnimationRecord { public string id; public string name; public float duration; public bool loop; public AnimationTrackRecord[] tracks; }
-        [Serializable] private sealed class AnimationTrackRecord { public string targetNodeId; public string property; public int morphTargetIndex = -1; public float[] times; public float[] values; public string interpolation; public bool baked; }
+        [Serializable] private sealed class AnimationTrackRecord { public string targetNodeId; public string property; public int morphTargetIndex = -1; public int materialIndex = -1; public float[] times; public float[] values; public string interpolation; public bool baked; }
         [Serializable] private sealed class MaterialRecord
         {
             public string id; public string name; public float[] baseColor; public float[] emissive; public float metallic; public float roughness = 0.5f; public bool transparent; public bool doubleSided; public float alphaCutoff; public bool unlit; public bool vertexColors;
-            public string baseColorTextureId; public string emissiveTextureId; public string normalTextureId;
+            public string baseColorTextureId; public string emissiveTextureId; public string normalTextureId; public float[] baseColorTextureST;
         }
-        [Serializable] private sealed class TextureRecord { public string id; public string name; public int width; public int height; public string encoding; public string data; }
+        [Serializable] private sealed class TextureRecord { public string id; public string name; public int width; public int height; public string encoding; public string data; public string wrapS; public string wrapT; }
+        private sealed class MaterialAnimationCapabilities { public bool transparent; public bool emission; }
         [Serializable] private sealed class RuntimeRecord
         {
             public string controller = "none"; public string colliderMode = "none"; public bool enableBlockEditing; public bool allowFly; public string hudStyle = "diagnostic";

@@ -5,6 +5,7 @@ import {
   Bone,
   BoxGeometry,
   BufferGeometry,
+  ColorKeyframeTrack,
   DataTexture,
   DirectionalLight,
   Float32BufferAttribute,
@@ -13,9 +14,12 @@ import {
   Mesh,
   MeshLambertMaterial,
   MeshStandardMaterial,
+  MirroredRepeatWrapping,
+  NumberKeyframeTrack,
   PerspectiveCamera,
   Quaternion,
   QuaternionKeyframeTrack,
+  RepeatWrapping,
   RGBAFormat,
   Scene,
   Skeleton,
@@ -127,10 +131,28 @@ test("exports reusable playable runtime configuration", async () => {
   assert.equal(document.runtime.hotbar[0].name, "Grass");
 });
 
-test("accepts pre-runtime format-v1 and pre-morph format-v2 documents", async () => {
+test("accepts pre-runtime v1, pre-morph v2, and pre-material-animation v3 documents", async () => {
   const scene = new Scene();
+  const texture = new DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1, RGBAFormat, UnsignedByteType);
+  const mesh = new Mesh(new BoxGeometry(), new MeshStandardMaterial({ map: texture }));
+  scene.add(mesh);
+  scene.animations.push(new AnimationClip("Move", 1, [
+    new VectorKeyframeTrack(`${mesh.uuid}.position`, [0, 1], [0, 0, 0, 1, 0, 0]),
+  ]));
   const currentDocument = await exportThreeUnity(scene);
-  const version2Document = structuredClone(currentDocument) as unknown as Record<string, unknown>;
+  const version3Document = structuredClone(currentDocument) as unknown as Record<string, unknown>;
+  version3Document.version = 3;
+  for (const exportedTexture of version3Document.textures as Array<Record<string, unknown>>) {
+    delete exportedTexture.wrapS;
+    delete exportedTexture.wrapT;
+  }
+  for (const material of version3Document.materials as Array<Record<string, unknown>>) delete material.baseColorTextureST;
+  for (const animation of version3Document.animations as Array<{ tracks: Array<Record<string, unknown>> }>) {
+    for (const track of animation.tracks) delete track.materialIndex;
+  }
+  assert.deepEqual(validateDocument(version3Document), { valid: true, errors: [] });
+
+  const version2Document = structuredClone(version3Document) as unknown as Record<string, unknown>;
   version2Document.version = 2;
   for (const node of version2Document.nodes as Array<Record<string, unknown>>) delete node.morphWeights;
   for (const mesh of version2Document.meshes as Array<Record<string, unknown>>) delete mesh.morphTargets;
@@ -203,7 +225,7 @@ test("exports a two-bone SkinnedMesh and baked AnimationClip with stable node re
   });
 
   assert.deepEqual(validateDocument(document), { valid: true, errors: [] });
-  assert.equal(document.version, 3);
+  assert.equal(document.version, 4);
   assert.equal(document.skins.length, 1);
   assert.equal(document.animations.length, 1);
   assert.equal(document.autoplayAnimation, true);
@@ -333,7 +355,7 @@ test("exports absolute and relative morph targets, initial weights, and baked mo
   const document = await exportThreeUnity(scene, { animationSampleRate: 4 });
 
   assert.deepEqual(validateDocument(document), { valid: true, errors: [] });
-  assert.equal(document.version, 3);
+  assert.equal(document.version, 4);
   assert.strictEqual(absoluteMesh.morphTargetInfluences, originalInfluenceReference);
   assert.deepEqual(absoluteMesh.morphTargetInfluences, originalInfluences);
   assert.deepEqual(absoluteMesh.position.toArray(), originalPosition);
@@ -365,6 +387,157 @@ test("exports absolute and relative morph targets, initial weights, and baked mo
   assert.deepEqual(morphTracks[0].times, [0, 0.25, 0.5, 0.75, 1]);
   assert.deepEqual(morphTracks[0].values, [0.25, 0.5, 0.75, 0.5, 0.25]);
   assert.deepEqual(morphTracks[1].values, [0, 0.5, 1, 0.5, 0]);
+});
+
+test("exports v4 static UV state and shared material animation without mutating Three.js state", async () => {
+  const scene = new Scene();
+  const texture = new DataTexture(new Uint8Array([
+    255, 32, 32, 255, 32, 255, 64, 255,
+    32, 64, 255, 255, 255, 224, 32, 255,
+  ]), 2, 2, RGBAFormat, UnsignedByteType);
+  texture.name = "Asymmetric Quadrants";
+  texture.wrapS = RepeatWrapping;
+  texture.wrapT = MirroredRepeatWrapping;
+  texture.repeat.set(1.5, 2.5);
+  texture.offset.set(0.125, 0.25);
+
+  const sharedMaterial = new MeshStandardMaterial({ map: texture, transparent: true });
+  sharedMaterial.name = "Shared Animated Material";
+  sharedMaterial.color.setRGB(0.2, 0.4, 0.8);
+  sharedMaterial.opacity = 0.8;
+  sharedMaterial.emissive.setRGB(0.02, 0.01, 0);
+  sharedMaterial.metalness = 0.1;
+  sharedMaterial.roughness = 0.6;
+  const accentMaterial = new MeshStandardMaterial({ color: 0x444444 });
+  accentMaterial.name = "Static Accent";
+
+  const primaryGeometry = new BufferGeometry();
+  primaryGeometry.setAttribute("position", new Float32BufferAttribute([
+    -0.5, 0, 0,
+    0.5, 0, 0,
+    0, 1, 0,
+  ], 3));
+  primaryGeometry.setAttribute("uv", new Float32BufferAttribute([0, 0, 1, 0, 0.5, 1], 2));
+  primaryGeometry.setIndex([0, 1, 2]);
+  primaryGeometry.computeVertexNormals();
+  primaryGeometry.morphAttributes.position = [new Float32BufferAttribute([
+    -0.5, 0, 0,
+    0.5, 0, 0,
+    0, 1, 0.4,
+  ], 3)];
+  const primary = new Mesh(primaryGeometry, sharedMaterial);
+  primary.name = "Primary Shared Mesh";
+  primary.morphTargetDictionary = { Lift: 0 };
+  primary.morphTargetInfluences = [0.2];
+
+  const groupedGeometry = new BufferGeometry();
+  groupedGeometry.setAttribute("position", new Float32BufferAttribute([
+    -1, -0.5, 0, 0, -0.5, 0, -0.5, 0.5, 0,
+    0, -0.5, 0, 1, -0.5, 0, 0.5, 0.5, 0,
+  ], 3));
+  groupedGeometry.setAttribute("uv", new Float32BufferAttribute([
+    0, 0, 1, 0, 0.5, 1,
+    0, 0, 1, 0, 0.5, 1,
+  ], 2));
+  groupedGeometry.setIndex([0, 1, 2, 3, 4, 5]);
+  groupedGeometry.addGroup(0, 3, 0);
+  groupedGeometry.addGroup(3, 3, 1);
+  groupedGeometry.computeVertexNormals();
+  const grouped = new Mesh(groupedGeometry, [accentMaterial, sharedMaterial]);
+  grouped.name = "Grouped Shared Mesh";
+  grouped.position.x = 2;
+  scene.add(primary, grouped);
+
+  const accentColor = accentMaterial.color.toArray();
+  const clip = new AnimationClip("Material UV Cycle", 1, [
+    new ColorKeyframeTrack(`${primary.uuid}.material.color`, [0, 0.5, 1], [
+      0.2, 0.4, 0.8,
+      1, 0.15, 0.05,
+      0.2, 0.4, 0.8,
+    ]),
+    new ColorKeyframeTrack(`${grouped.uuid}.material[0].color`, [0, 0.5, 1], [
+      ...accentColor,
+      0.1, 0.9, 0.3,
+      ...accentColor,
+    ]),
+    new NumberKeyframeTrack(`${primary.uuid}.material.opacity`, [0, 0.5, 1], [0.8, 0.35, 0.8]),
+    new ColorKeyframeTrack(`${primary.uuid}.material.emissive`, [0, 0.5, 1], [
+      0.02, 0.01, 0,
+      0.8, 0.25, 0.05,
+      0.02, 0.01, 0,
+    ]),
+    new NumberKeyframeTrack(`${primary.uuid}.material.metalness`, [0, 0.5, 1], [0.1, 0.85, 0.1]),
+    new NumberKeyframeTrack(`${primary.uuid}.material.roughness`, [0, 0.5, 1], [0.6, 0.15, 0.6]),
+    new VectorKeyframeTrack(`${primary.uuid}.map.offset`, [0, 0.5, 1], [
+      0.125, 0.25,
+      0.625, 1.25,
+      1.125, 2.25,
+    ]),
+    new VectorKeyframeTrack(`${primary.uuid}.map.repeat`, [0, 0.5, 1], [
+      1.5, 2.5,
+      3, 1.25,
+      1.5, 2.5,
+    ]),
+    new VectorKeyframeTrack(`${primary.uuid}.position`, [0, 0.5, 1], [0, 0, 0, 0, 0.25, 0, 0, 0, 0]),
+    new VectorKeyframeTrack(`${primary.uuid}.morphTargetInfluences`, [0, 0.5, 1], [0.2, 0.9, 0.2]),
+  ]);
+  scene.animations.push(clip);
+
+  const original = {
+    color: sharedMaterial.color.toArray(),
+    opacity: sharedMaterial.opacity,
+    emissive: sharedMaterial.emissive.toArray(),
+    metalness: sharedMaterial.metalness,
+    roughness: sharedMaterial.roughness,
+    offset: texture.offset.toArray(),
+    repeat: texture.repeat.toArray(),
+    accentColor: accentMaterial.color.toArray(),
+    position: primary.position.toArray(),
+    morphWeights: [...primary.morphTargetInfluences],
+  };
+  const document = await exportThreeUnity(scene, { animationSampleRate: 2 });
+
+  assert.deepEqual(validateDocument(document), { valid: true, errors: [] });
+  assert.equal(document.version, 4);
+  assert.equal(document.textures[0].wrapS, "repeat");
+  assert.equal(document.textures[0].wrapT, "mirror");
+  const exportedSharedMaterial = document.materials.find((material) => material.name === sharedMaterial.name);
+  assert.ok(exportedSharedMaterial);
+  assert.deepEqual(exportedSharedMaterial.baseColorTextureST, [1.5, 2.5, 0.125, 0.25]);
+
+  const primaryNode = document.nodes.find((node) => node.name === primary.name);
+  const groupedNode = document.nodes.find((node) => node.name === grouped.name);
+  assert.ok(primaryNode && groupedNode);
+  const tracks = document.animations[0].tracks;
+  for (const property of ["materialEmissive", "materialMetallic", "materialRoughness", "materialBaseMapST"] as const) {
+    const bindings = tracks
+      .filter((track) => track.property === property)
+      .map((track) => `${track.targetNodeId}:${track.materialIndex}`)
+      .sort();
+    assert.deepEqual(bindings, [`${primaryNode.id}:0`, `${groupedNode.id}:1`].sort());
+  }
+  const baseColorBindings = tracks
+    .filter((track) => track.property === "materialBaseColor")
+    .map((track) => `${track.targetNodeId}:${track.materialIndex}`)
+    .sort();
+  assert.deepEqual(baseColorBindings, [`${primaryNode.id}:0`, `${groupedNode.id}:0`, `${groupedNode.id}:1`].sort());
+  const baseColorTrack = tracks.find((track) => track.property === "materialBaseColor" && track.targetNodeId === primaryNode.id);
+  assert.ok(baseColorTrack);
+  assert.equal(baseColorTrack.values.length, baseColorTrack.times.length * 4);
+  assert.ok(baseColorTrack.values.some((value) => Math.abs(value - 0.35) < 1e-6));
+  assert.ok(tracks.some((track) => track.property === "position" && track.materialIndex === -1));
+  assert.ok(tracks.some((track) => track.property === "morphWeight" && track.materialIndex === -1));
+
+  assert.deepEqual(sharedMaterial.color.toArray(), original.color);
+  assert.equal(sharedMaterial.opacity, original.opacity);
+  assert.deepEqual(sharedMaterial.emissive.toArray(), original.emissive);
+  assert.equal(sharedMaterial.metalness, original.metalness);
+  assert.equal(sharedMaterial.roughness, original.roughness);
+  assert.deepEqual(texture.offset.toArray(), original.offset);
+  assert.deepEqual(texture.repeat.toArray(), original.repeat);
+  assert.deepEqual(accentMaterial.color.toArray(), original.accentColor);
+  assert.deepEqual(primary.position.toArray(), original.position);
+  assert.deepEqual(primary.morphTargetInfluences, original.morphWeights);
 });
 
 test("omits invisible subtrees by default", async () => {

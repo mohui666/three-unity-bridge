@@ -32,7 +32,8 @@ MemoryCaptures/
 Recordings/
 *.utmp
 
-# Local integration workspaces and cloned upstream games
+# Local conversion samples, generated captures, and integration workspaces
+conversions/
 conversion-work/
 unity-smoke/
 unity-winding-verify*/

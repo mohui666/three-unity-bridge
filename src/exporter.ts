@@ -4,15 +4,18 @@ import {
   BufferAttribute,
   BufferGeometry,
   Camera,
+  ClampToEdgeWrapping,
   Color,
   FrontSide,
   LoopOnce,
   Material,
   Mesh,
   MeshStandardMaterial,
+  MirroredRepeatWrapping,
   Object3D,
   PropertyBinding,
   Quaternion,
+  RepeatWrapping,
   Scene,
   SkinnedMesh,
   Texture,
@@ -35,6 +38,7 @@ import {
   ThreeUnityRuntime,
   ThreeUnitySkin,
   ThreeUnityTexture,
+  ThreeUnityTextureWrap,
 } from "./schema.js";
 
 export interface ThreeUnityExportOptions {
@@ -91,7 +95,15 @@ export async function exportThreeUnity(
     const id = stableId("texture", texture.uuid, textureIds.size);
     textureIds.set(texture, id);
     const encoded = await encodeTexture(texture, warnings);
-    textures.push({ id, name: texture.name || id, ...encoded, flipY: texture.flipY, colorSpace: texture.colorSpace });
+    textures.push({
+      id,
+      name: texture.name || id,
+      ...encoded,
+      flipY: texture.flipY,
+      colorSpace: texture.colorSpace,
+      wrapS: exportTextureWrap(texture, "wrapS", texture.wrapS, warnings),
+      wrapT: exportTextureWrap(texture, "wrapT", texture.wrapT, warnings),
+    });
     return id;
   };
 
@@ -106,6 +118,7 @@ export async function exportThreeUnity(
     }
     const baseColor = readColor((material as Material & { color?: Color }).color, [1, 1, 1]);
     const emissive = readColor(standard.emissive, [0, 0, 0]);
+    const baseColorTextureST = readBaseColorTextureST(material, standard.map, warnings);
     const converted: ThreeUnityMaterial = {
       id,
       name: material.name || id,
@@ -123,6 +136,7 @@ export async function exportThreeUnity(
       unlit: material.type === "MeshBasicMaterial" || Boolean((material as Material & { isMeshBasicMaterial?: boolean }).isMeshBasicMaterial),
       vertexColors: Boolean((material as Material & { vertexColors?: boolean }).vertexColors),
       baseColorTextureId: await registerTexture(standard.map),
+      baseColorTextureST,
       emissiveTextureId: await registerTexture(standard.emissiveMap),
       normalTextureId: await registerTexture(standard.normalMap),
       metallicRoughnessTextureId: await registerTexture(standard.metalnessMap || standard.roughnessMap),
@@ -232,7 +246,7 @@ export async function exportThreeUnity(
     }
     if (!(object as Mesh).isMesh && isUnsupportedRenderable(object)) {
       if (!warnedRenderableTypes.has(object.type)) {
-        warnings.push(`${object.type} renderables are preserved as transforms only in format v3.`);
+        warnings.push(`${object.type} renderables are preserved as transforms only in format v4.`);
         warnedRenderableTypes.add(object.type);
       }
     }
@@ -253,12 +267,14 @@ export async function exportThreeUnity(
     const parentId = detachedRoot.parent && visitedObjects.has(detachedRoot.parent) ? nodeIdFor(detachedRoot.parent) : "";
     await visit(detachedRoot, parentId, true);
   }
+  const materialSlots = collectExportedMaterialSlots(visitedObjects);
   const animationResult = exportAnimations(
     root,
     options.animations ?? root.animations,
     options,
     visitedObjects,
     morphTargetNamesByObject,
+    materialSlots,
     nodeIdFor,
     warnings,
   );
@@ -294,7 +310,35 @@ interface SampledTransform {
   scale: number[];
 }
 
-type ThreeUnityTransformAnimationProperty = Exclude<ThreeUnityAnimationProperty, "morphWeight">;
+type ThreeUnityTransformAnimationProperty = "position" | "quaternion" | "scale";
+type ThreeUnityMaterialAnimationProperty = Extract<
+  ThreeUnityAnimationProperty,
+  "materialBaseColor" | "materialEmissive" | "materialMetallic" | "materialRoughness" | "materialBaseMapST"
+>;
+
+interface ExportedMaterialSlot {
+  object: Mesh;
+  materialIndex: number;
+  material: Material;
+}
+
+interface SampledMaterialState {
+  materialBaseColor: [number, number, number, number];
+  materialEmissive: [number, number, number];
+  materialMetallic: [number];
+  materialRoughness: [number];
+  materialBaseMapST: [number, number, number, number];
+}
+
+type SampledMaterialChannels = Record<ThreeUnityMaterialAnimationProperty, number[]>;
+
+const MATERIAL_ANIMATION_PROPERTIES: readonly ThreeUnityMaterialAnimationProperty[] = [
+  "materialBaseColor",
+  "materialEmissive",
+  "materialMetallic",
+  "materialRoughness",
+  "materialBaseMapST",
+];
 
 interface SavedMorphWeights {
   reference: number[] | undefined;
@@ -308,6 +352,7 @@ function exportAnimations(
   options: ThreeUnityExportOptions,
   visitedObjects: Set<Object3D>,
   morphTargetNamesByObject: Map<Object3D, string[]>,
+  materialSlots: ExportedMaterialSlot[],
   nodeIdFor: (object: Object3D) => string,
   warnings: string[],
 ): { animations: ThreeUnityAnimation[]; defaultAnimationId: string; autoplayAnimation: boolean } {
@@ -326,27 +371,34 @@ function exportAnimations(
     if (clip.tracks.length === 0) warnings.push(`${clip.name || clip.uuid}: empty animation clip has no tracks.`);
     const properties = new Set<ThreeUnityTransformAnimationProperty>();
     let samplesMorphWeights = false;
+    let samplesMaterials = false;
     const supportedTracks = clip.tracks.filter((track) => {
       let parsed: ReturnType<typeof PropertyBinding.parseTrackName>;
       try {
         parsed = PropertyBinding.parseTrackName(track.name);
       } catch (error) {
-        warnings.push(`${clip.name || clip.uuid}: track '${track.name}' could not be parsed (${error instanceof Error ? error.message : String(error)}).`);
+        if (isMultiMaterialUvTrackName(track.name)) {
+          warnings.push(`${clip.name || clip.uuid}: track '${track.name}' targets multi-material base-map UV animation, which is not supported.`);
+        } else {
+          warnings.push(`${clip.name || clip.uuid}: track '${track.name}' could not be parsed (${error instanceof Error ? error.message : String(error)}).`);
+        }
         return false;
       }
-      const transformProperty = isTransformAnimationProperty(parsed.propertyName) ? parsed.propertyName : undefined;
+      const materialObject = parsed.objectName === "material" || parsed.objectName === "map";
+      const transformProperty = !materialObject && isTransformAnimationProperty(parsed.propertyName) ? parsed.propertyName : undefined;
       const morphProperty = parsed.objectName === undefined && parsed.propertyName === "morphTargetInfluences";
-      if (!transformProperty && !morphProperty) {
+      const materialProperty = materialObject && isSupportedMaterialSourceProperty(parsed.objectName, parsed.propertyName);
+      if (!transformProperty && !morphProperty && !materialProperty) {
         warnings.push(`${clip.name || clip.uuid}: track '${track.name}' targets unsupported property '${parsed.propertyName}'.`);
         return false;
       }
       const target = PropertyBinding.findNode(root, parsed.nodeName);
-      if (parsed.nodeName || morphProperty) {
+      if (parsed.nodeName || morphProperty || materialProperty) {
         if (!target) {
           warnings.push(`${clip.name || clip.uuid}: track '${track.name}' does not resolve to a node under the exported root.`);
           return false;
         }
-        if (parsed.objectName === undefined && !exportedObjectSet.has(target as Object3D)) {
+        if ((parsed.objectName === undefined || materialProperty) && !exportedObjectSet.has(target as Object3D)) {
           warnings.push(`${clip.name || clip.uuid}: track '${track.name}' resolves to a node that was not exported.`);
           return false;
         }
@@ -359,6 +411,9 @@ function exportAnimations(
         samplesMorphWeights = true;
       } else if (transformProperty) {
         properties.add(transformProperty);
+      } else if (materialProperty) {
+        if (!target || !validateMaterialSourceTrackTarget(target as Object3D, parsed, clip, track.name, warnings)) return false;
+        samplesMaterials = true;
       }
       return true;
     });
@@ -369,13 +424,15 @@ function exportAnimations(
       supportedTracks,
       properties,
       samplesMorphWeights,
+      samplesMaterials,
       sampleRate,
       exportedObjects,
       morphTargetNamesByObject,
+      materialSlots,
       nodeIdFor,
     );
     if (supportedTracks.length > 0 && tracks.length === 0) {
-      warnings.push(`${clip.name || clip.uuid}: supported tracks produced no exported transform or morph-weight changes.`);
+      warnings.push(`${clip.name || clip.uuid}: supported tracks produced no exported transform, morph-weight, or material changes.`);
     }
     animations.push({
       id,
@@ -412,9 +469,11 @@ function bakeAnimationClip(
   sourceTracks: AnimationClip["tracks"],
   properties: Set<ThreeUnityTransformAnimationProperty>,
   samplesMorphWeights: boolean,
+  samplesMaterials: boolean,
   sampleRate: number,
   objects: Object3D[],
   morphTargetNamesByObject: Map<Object3D, string[]>,
+  materialSlots: ExportedMaterialSlot[],
   nodeIdFor: (object: Object3D) => string,
 ): ThreeUnityAnimationTrack[] {
   if (sourceTracks.length === 0) return [];
@@ -422,6 +481,8 @@ function bakeAnimationClip(
   const sampled = new Map<Object3D, SampledTransform>();
   const savedMorphWeights = new Map<Mesh, SavedMorphWeights>();
   const sampledMorphWeights = new Map<Mesh, number[][]>();
+  const savedMaterialStates = new Map<ExportedMaterialSlot, SampledMaterialState>();
+  const sampledMaterialChannels = new Map<ExportedMaterialSlot, SampledMaterialChannels>();
   for (const object of objects) {
     saved.set(object, {
       position: [object.position.x, object.position.y, object.position.z],
@@ -438,6 +499,12 @@ function bakeAnimationClip(
       const initialTargetValues = targetNames.map((targetName, targetIndex) => readMorphInfluence(mesh, targetIndex, targetName, clip, true));
       savedMorphWeights.set(mesh, { reference, values, initialTargetValues });
       sampledMorphWeights.set(mesh, targetNames.map(() => []));
+    }
+  }
+  if (samplesMaterials) {
+    for (const slot of materialSlots) {
+      savedMaterialStates.set(slot, readSampledMaterialState(slot, clip, true));
+      sampledMaterialChannels.set(slot, createSampledMaterialChannels());
     }
   }
 
@@ -466,6 +533,13 @@ function bakeAnimationClip(
           }
         }
       }
+      if (samplesMaterials) {
+        for (const slot of materialSlots) {
+          const state = readSampledMaterialState(slot, clip, false);
+          const channels = sampledMaterialChannels.get(slot)!;
+          for (const property of MATERIAL_ANIMATION_PROPERTIES) channels[property].push(...state[property]);
+        }
+      }
     }
   } finally {
     mixer.stopAllAction();
@@ -485,6 +559,7 @@ function bakeAnimationClip(
       morphWeights.reference.length = morphWeights.values.length;
       for (let index = 0; index < morphWeights.values.length; index += 1) morphWeights.reference[index] = morphWeights.values[index];
     }
+    for (const [slot, state] of savedMaterialStates) restoreSampledMaterialState(slot.material, state);
     root.updateMatrixWorld(true);
   }
 
@@ -499,6 +574,7 @@ function bakeAnimationClip(
         targetNodeId: nodeIdFor(object),
         property,
         morphTargetIndex: -1,
+        materialIndex: -1,
         times: [...times],
         values: values[property],
         interpolation: "linear",
@@ -517,8 +593,28 @@ function bakeAnimationClip(
         targetNodeId: nodeIdFor(object),
         property: "morphWeight",
         morphTargetIndex: targetIndex,
+        materialIndex: -1,
         times: [...times],
         values: targetValues[targetIndex],
+        interpolation: "linear",
+        baked: true,
+      });
+    }
+  }
+  for (const slot of materialSlots) {
+    const initialState = savedMaterialStates.get(slot);
+    const sampledChannels = sampledMaterialChannels.get(slot);
+    if (!initialState || !sampledChannels) continue;
+    for (const property of MATERIAL_ANIMATION_PROPERTIES) {
+      const dimensions = initialState[property].length;
+      if (!sampledValuesChange(sampledChannels[property], initialState[property], dimensions)) continue;
+      tracks.push({
+        targetNodeId: nodeIdFor(slot.object),
+        property,
+        morphTargetIndex: -1,
+        materialIndex: slot.materialIndex,
+        times: [...times],
+        values: sampledChannels[property],
         interpolation: "linear",
         baked: true,
       });
@@ -562,6 +658,175 @@ function sampledValuesChange(values: number[], original: readonly number[], dime
 
 function isTransformAnimationProperty(value: string): value is ThreeUnityTransformAnimationProperty {
   return value === "position" || value === "quaternion" || value === "scale";
+}
+
+function collectExportedMaterialSlots(objects: Set<Object3D>): ExportedMaterialSlot[] {
+  const slots: ExportedMaterialSlot[] = [];
+  for (const object of objects) {
+    const mesh = object as Mesh & { isInstancedMesh?: boolean };
+    if (!mesh.isMesh || mesh.isInstancedMesh) continue;
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    const materialIndices = Array.isArray(mesh.material)
+      ? mesh.geometry.groups.length > 0
+        ? [...new Set(mesh.geometry.groups.map((group) => group.materialIndex ?? 0))]
+        : [0]
+      : [0];
+    for (const materialIndex of materialIndices) {
+      if (!Number.isInteger(materialIndex) || materialIndex < 0 || materialIndex >= materials.length) {
+        throw new Error(
+          `Mesh '${mesh.name || mesh.uuid}' uses source material index '${materialIndex}' but has ${materials.length} material slot(s).`,
+        );
+      }
+      slots.push({ object: mesh, materialIndex, material: materials[materialIndex] });
+    }
+  }
+  return slots;
+}
+
+function isSupportedMaterialSourceProperty(objectName: string | undefined, propertyName: string): boolean {
+  if (objectName === "map") return propertyName === "offset" || propertyName === "repeat";
+  return objectName === "material"
+    && (propertyName === "color"
+      || propertyName === "opacity"
+      || propertyName === "emissive"
+      || propertyName === "metalness"
+      || propertyName === "roughness");
+}
+
+function isMultiMaterialUvTrackName(trackName: string): boolean {
+  return /\.material\[[^\]]+\]\.map\.(?:offset|repeat)(?:\[[^\]]+\])?$/.test(trackName);
+}
+
+function validateMaterialSourceTrackTarget(
+  target: Object3D,
+  parsed: ReturnType<typeof PropertyBinding.parseTrackName>,
+  clip: AnimationClip,
+  trackName: string,
+  warnings: string[],
+): boolean {
+  const label = `${clip.name || clip.uuid}: track '${trackName}'`;
+  const mesh = target as Mesh & { isInstancedMesh?: boolean };
+  if (!mesh.isMesh || mesh.isInstancedMesh) {
+    warnings.push(`${label} must resolve to an exported non-instanced Mesh.`);
+    return false;
+  }
+  const materialValue = mesh.material;
+  if (parsed.objectName === "map") {
+    if (Array.isArray(materialValue)) {
+      warnings.push(`${label} targets multi-material base-map UV animation, which is not supported.`);
+      return false;
+    }
+    const map = (materialValue as MeshStandardMaterial).map;
+    if (!map) {
+      warnings.push(`${label} requires a single material with a base color map.`);
+      return false;
+    }
+    return true;
+  }
+
+  let material: Material;
+  if (Array.isArray(materialValue)) {
+    if (parsed.objectIndex === undefined) {
+      warnings.push(`${label} must specify a source material index for a material array.`);
+      return false;
+    }
+    const materialIndex = Number(parsed.objectIndex);
+    if (!Number.isInteger(materialIndex) || materialIndex < 0 || materialIndex >= materialValue.length) {
+      warnings.push(`${label} references source material index '${parsed.objectIndex}', but the Mesh has ${materialValue.length} material(s).`);
+      return false;
+    }
+    material = materialValue[materialIndex];
+  } else {
+    if (parsed.objectIndex !== undefined) {
+      warnings.push(`${label} specifies source material index '${parsed.objectIndex}' for a single-material Mesh.`);
+      return false;
+    }
+    material = materialValue;
+  }
+
+  const standard = material as MeshStandardMaterial;
+  const supported = parsed.propertyName === "color"
+    ? Boolean((material as Material & { color?: Color }).color)
+    : parsed.propertyName === "opacity"
+      ? typeof material.opacity === "number"
+      : parsed.propertyName === "emissive"
+        ? Boolean(standard.emissive)
+        : parsed.propertyName === "metalness"
+          ? typeof standard.metalness === "number"
+          : typeof standard.roughness === "number";
+  if (!supported) {
+    warnings.push(`${label} targets property '${parsed.propertyName}' that material '${material.name || material.uuid}' does not expose.`);
+    return false;
+  }
+  return true;
+}
+
+function createSampledMaterialChannels(): SampledMaterialChannels {
+  return {
+    materialBaseColor: [],
+    materialEmissive: [],
+    materialMetallic: [],
+    materialRoughness: [],
+    materialBaseMapST: [],
+  };
+}
+
+function readSampledMaterialState(slot: ExportedMaterialSlot, clip: AnimationClip, initial: boolean): SampledMaterialState {
+  const material = slot.material as Material & {
+    color?: Color;
+    emissive?: Color;
+    metalness?: number;
+    roughness?: number;
+    map?: Texture | null;
+  };
+  const read = (value: number, property: string): number => {
+    if (Number.isFinite(value)) return value;
+    const phase = initial ? "initial" : "sampled";
+    throw new Error(
+      `Animation '${clip.name || clip.uuid}' ${phase} material state for node '${slot.object.name || slot.object.uuid}', source material index ${slot.materialIndex}, material '${material.name || material.uuid}', property '${property}' must be finite, received '${value}'.`,
+    );
+  };
+  const color = material.color;
+  const emissive = material.emissive;
+  const map = material.map;
+  return {
+    materialBaseColor: [
+      read(color?.r ?? 1, "color.r"),
+      read(color?.g ?? 1, "color.g"),
+      read(color?.b ?? 1, "color.b"),
+      read(material.opacity, "opacity"),
+    ],
+    materialEmissive: [
+      read(emissive?.r ?? 0, "emissive.r"),
+      read(emissive?.g ?? 0, "emissive.g"),
+      read(emissive?.b ?? 0, "emissive.b"),
+    ],
+    materialMetallic: [read(material.metalness ?? 0, "metalness")],
+    materialRoughness: [read(material.roughness ?? 0.5, "roughness")],
+    materialBaseMapST: [
+      read(map?.repeat.x ?? 1, "map.repeat.x"),
+      read(map?.repeat.y ?? 1, "map.repeat.y"),
+      read(map?.offset.x ?? 0, "map.offset.x"),
+      read(map?.offset.y ?? 0, "map.offset.y"),
+    ],
+  };
+}
+
+function restoreSampledMaterialState(materialValue: Material, state: SampledMaterialState): void {
+  const material = materialValue as Material & {
+    color?: Color;
+    emissive?: Color;
+    metalness?: number;
+    roughness?: number;
+    map?: Texture | null;
+  };
+  material.color?.setRGB(state.materialBaseColor[0], state.materialBaseColor[1], state.materialBaseColor[2]);
+  material.opacity = state.materialBaseColor[3];
+  material.emissive?.setRGB(...state.materialEmissive);
+  if (typeof material.metalness === "number") material.metalness = state.materialMetallic[0];
+  if (typeof material.roughness === "number") material.roughness = state.materialRoughness[0];
+  material.map?.repeat.set(state.materialBaseMapST[0], state.materialBaseMapST[1]);
+  material.map?.offset.set(state.materialBaseMapST[2], state.materialBaseMapST[3]);
 }
 
 function normalizeRuntime(runtime: Partial<ThreeUnityRuntime> | undefined): ThreeUnityRuntime {
@@ -693,7 +958,7 @@ async function exportInstances(
       components: [],
     });
   }
-  if (object.instanceColor) warnings.push(`${object.name || object.uuid}: per-instance colors are not exported in format v3.`);
+  if (object.instanceColor) warnings.push(`${object.name || object.uuid}: per-instance colors are not exported in format v4.`);
 }
 
 function readMorphAttributes(mesh: Mesh, semantic: "position" | "normal"): BufferAttribute[] {
@@ -858,6 +1123,37 @@ function attributeToArray(attribute: BufferAttribute, targetItemSize = attribute
   return output;
 }
 
+function exportTextureWrap(texture: Texture, axis: "wrapS" | "wrapT", value: number, warnings: string[]): ThreeUnityTextureWrap {
+  if (value === RepeatWrapping) return "repeat";
+  if (value === ClampToEdgeWrapping) return "clamp";
+  if (value === MirroredRepeatWrapping) return "mirror";
+  warnings.push(`Texture '${texture.name || texture.uuid}' has unsupported ${axis} value '${value}'; clamp was exported.`);
+  return "clamp";
+}
+
+function readBaseColorTextureST(material: Material, texture: Texture | null, warnings: string[]): [number, number, number, number] {
+  if (!texture) return [1, 1, 0, 0];
+  const label = `Material '${material.name || material.uuid}' base color texture '${texture.name || texture.uuid}'`;
+  const values: [number, number, number, number] = [texture.repeat.x, texture.repeat.y, texture.offset.x, texture.offset.y];
+  for (const [index, value] of values.entries()) {
+    if (!Number.isFinite(value)) throw new Error(`${label} ST component ${index} must be finite, received '${value}'.`);
+  }
+  if (texture.rotation !== 0) warnings.push(`${label} rotation '${texture.rotation}' is not converted.`);
+  if (texture.center.x !== 0 || texture.center.y !== 0) {
+    warnings.push(`${label} center '${texture.center.x}, ${texture.center.y}' is not converted.`);
+  }
+  if (!texture.matrixAutoUpdate && !isIdentityTextureMatrix(texture.matrix.elements)) {
+    warnings.push(`${label} uses a custom UV matrix, which is not converted.`);
+  }
+  if (texture.channel !== 0) warnings.push(`${label} UV channel '${texture.channel}' is not converted.`);
+  return values;
+}
+
+function isIdentityTextureMatrix(elements: readonly number[]): boolean {
+  const identity = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+  return elements.length === identity.length && elements.every((value, index) => value === identity[index]);
+}
+
 function readColor(color: Color | undefined, fallback: [number, number, number]): [number, number, number] {
   return color ? [color.r, color.g, color.b] : fallback;
 }
@@ -880,12 +1176,12 @@ async function encodeTexture(texture: Texture, warnings: string[]): Promise<Pick
   const height = image?.height ?? 0;
   if (image?.data && width > 0 && height > 0) {
     if (!(image.data instanceof Uint8Array) && !(image.data instanceof Uint8ClampedArray)) {
-      warnings.push(`${texture.name || texture.uuid}: only unsigned-byte DataTexture is supported in format v3.`);
+      warnings.push(`${texture.name || texture.uuid}: only unsigned-byte DataTexture is supported in format v4.`);
       return { width, height, encoding: "rgba8", data: "" };
     }
     const bytes = image.data instanceof Uint8Array ? image.data : new Uint8Array(image.data);
     if (bytes.length !== width * height * 4) {
-      warnings.push(`${texture.name || texture.uuid}: only 4-channel Uint8 DataTexture is supported in format v3.`);
+      warnings.push(`${texture.name || texture.uuid}: only 4-channel Uint8 DataTexture is supported in format v4.`);
       return { width, height, encoding: "rgba8", data: "" };
     }
     return { width, height, encoding: "rgba8", data: bytesToBase64(bytes) };

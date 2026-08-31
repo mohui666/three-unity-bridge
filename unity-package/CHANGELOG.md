@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added `.threeunity` format v4 texture wrap modes, base-map scale/offset, and renderer-slot-aware material animation bindings.
+- `ThreeUnityAnimationPlayer` now samples material color, emission, metallic/roughness, opacity, and base-map UV tracks through `MaterialPropertyBlock` while retaining the legacy `Animation` clock.
+- Added deterministic material animation sampling/reset APIs and a self-contained Material UV Animation sample.
 - Added `.threeunity` format v3 morph targets, initial morph weights, and morph-weight animation curves as Unity BlendShapes on `SkinnedMeshRenderer`.
 - Animated bounds now include BlendShape deformation while restoring initial weights after sampling.
 - Added a self-contained Morph Target Animation sample and one focused importer deformation smoke test.

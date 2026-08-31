@@ -1,7 +1,8 @@
 export const THREE_UNITY_FORMAT = "three-unity-scene" as const;
 export const THREE_UNITY_LEGACY_VERSION = 1 as const;
 export const THREE_UNITY_SKINNED_VERSION = 2 as const;
-export const THREE_UNITY_VERSION = 3 as const;
+export const THREE_UNITY_MORPH_VERSION = 3 as const;
+export const THREE_UNITY_VERSION = 4 as const;
 
 export type Vec2 = [number, number];
 export type Vec3 = [number, number, number];
@@ -124,12 +125,22 @@ export interface ThreeUnitySkin {
   bindMatrix: number[];
 }
 
-export type ThreeUnityAnimationProperty = "position" | "quaternion" | "scale" | "morphWeight";
+export type ThreeUnityAnimationProperty =
+  | "position"
+  | "quaternion"
+  | "scale"
+  | "morphWeight"
+  | "materialBaseColor"
+  | "materialEmissive"
+  | "materialMetallic"
+  | "materialRoughness"
+  | "materialBaseMapST";
 
 export interface ThreeUnityAnimationTrack {
   targetNodeId: string;
   property: ThreeUnityAnimationProperty;
   morphTargetIndex: number;
+  materialIndex: number;
   times: number[];
   values: number[];
   interpolation: "linear";
@@ -165,10 +176,13 @@ export interface ThreeUnityMaterial {
   unlit: boolean;
   vertexColors: boolean;
   baseColorTextureId: string;
+  baseColorTextureST: Vec4;
   emissiveTextureId: string;
   normalTextureId: string;
   metallicRoughnessTextureId: string;
 }
+
+export type ThreeUnityTextureWrap = "repeat" | "clamp" | "mirror";
 
 export interface ThreeUnityTexture {
   id: string;
@@ -179,6 +193,8 @@ export interface ThreeUnityTexture {
   data: string;
   flipY: boolean;
   colorSpace: string;
+  wrapS: ThreeUnityTextureWrap;
+  wrapT: ThreeUnityTextureWrap;
 }
 
 export interface ValidationResult {
@@ -195,8 +211,15 @@ export function validateDocument(value: unknown): ValidationResult {
   const document = value as Partial<ThreeUnityDocument>;
   if (document.format !== THREE_UNITY_FORMAT) errors.push(`format must be '${THREE_UNITY_FORMAT}'.`);
   const version = (document as { version?: unknown }).version;
-  if (version !== THREE_UNITY_LEGACY_VERSION && version !== THREE_UNITY_SKINNED_VERSION && version !== THREE_UNITY_VERSION) {
-    errors.push(`version must be ${THREE_UNITY_LEGACY_VERSION}, ${THREE_UNITY_SKINNED_VERSION}, or ${THREE_UNITY_VERSION}.`);
+  if (
+    version !== THREE_UNITY_LEGACY_VERSION
+    && version !== THREE_UNITY_SKINNED_VERSION
+    && version !== THREE_UNITY_MORPH_VERSION
+    && version !== THREE_UNITY_VERSION
+  ) {
+    errors.push(
+      `version must be ${THREE_UNITY_LEGACY_VERSION}, ${THREE_UNITY_SKINNED_VERSION}, ${THREE_UNITY_MORPH_VERSION}, or ${THREE_UNITY_VERSION}.`,
+    );
   }
   if (!Array.isArray(document.nodes)) errors.push("nodes must be an array.");
   if (!Array.isArray(document.meshes)) errors.push("meshes must be an array.");
@@ -210,8 +233,9 @@ export function validateDocument(value: unknown): ValidationResult {
     errors.push("runtime must be an object when present.");
   }
 
-  const v2OrLater = version === THREE_UNITY_SKINNED_VERSION || version === THREE_UNITY_VERSION;
-  const v3 = version === THREE_UNITY_VERSION;
+  const v2OrLater = version === THREE_UNITY_SKINNED_VERSION || version === THREE_UNITY_MORPH_VERSION || version === THREE_UNITY_VERSION;
+  const v3OrLater = version === THREE_UNITY_MORPH_VERSION || version === THREE_UNITY_VERSION;
+  const v4 = version === THREE_UNITY_VERSION;
   const documentV2 = document as Partial<ThreeUnityDocument>;
   if (v2OrLater) {
     if (!Array.isArray(documentV2.skins)) errors.push("skins must be an array in version 2 or later.");
@@ -232,7 +256,7 @@ export function validateDocument(value: unknown): ValidationResult {
       if (!Array.isArray(node.quaternion) || node.quaternion.length !== 4) errors.push(`nodes[${index}].quaternion must have 4 values.`);
       if (!Array.isArray(node.scale) || node.scale.length !== 3) errors.push(`nodes[${index}].scale must have 3 values.`);
       if (v2OrLater && typeof node.skinId !== "string") errors.push(`nodes[${index}].skinId must be a string in version 2 or later.`);
-      if (v3 && !isFiniteNumberArray(node.morphWeights)) errors.push(`nodes[${index}].morphWeights must contain finite values in version 3.`);
+      if (v3OrLater && !isFiniteNumberArray(node.morphWeights)) errors.push(`nodes[${index}].morphWeights must contain finite values in version 3 or later.`);
     }
     for (const node of document.nodes) {
       if (node.parentId && !nodeIds.has(node.parentId)) errors.push(`Node '${node.id}' references missing parent '${node.parentId}'.`);
@@ -247,16 +271,40 @@ export function validateDocument(value: unknown): ValidationResult {
       meshesById.set(mesh.id, mesh);
       if (v2OrLater && !Array.isArray(mesh.skinIndices)) errors.push(`meshes[${index}].skinIndices must be an array in version 2 or later.`);
       if (v2OrLater && !Array.isArray(mesh.skinWeights)) errors.push(`meshes[${index}].skinWeights must be an array in version 2 or later.`);
-      if (v3) validateMorphTargets(mesh, `meshes[${index}]`, errors);
+      if (v3OrLater) validateMorphTargets(mesh, `meshes[${index}]`, errors);
     }
   }
 
   for (const node of nodesById.values()) {
     if (node.meshId && !meshesById.has(node.meshId)) errors.push(`Node '${node.id}' references missing mesh '${node.meshId}'.`);
-    if (v3 && Array.isArray(node.morphWeights)) {
+    if (v3OrLater && Array.isArray(node.morphWeights)) {
       const expectedCount = node.meshId ? meshesById.get(node.meshId)?.morphTargets?.length ?? 0 : 0;
       if (node.morphWeights.length !== expectedCount) {
         errors.push(`Node '${node.id}' morphWeights length must match its mesh morph target count (${expectedCount}).`);
+      }
+    }
+  }
+
+  const materialsById = new Map<string, ThreeUnityMaterial>();
+  const textureIds = new Set<string>();
+  if (v4 && Array.isArray(document.textures)) {
+    for (const [index, texture] of document.textures.entries()) {
+      const path = `textures[${index}]`;
+      if (!texture.id) errors.push(`${path}.id is required.`);
+      if (textureIds.has(texture.id)) errors.push(`Duplicate texture id '${texture.id}'.`);
+      textureIds.add(texture.id);
+      if (!isTextureWrap(texture.wrapS)) errors.push(`${path}.wrapS must be repeat, clamp, or mirror.`);
+      if (!isTextureWrap(texture.wrapT)) errors.push(`${path}.wrapT must be repeat, clamp, or mirror.`);
+    }
+  }
+  if (v4 && Array.isArray(document.materials)) {
+    for (const [index, material] of document.materials.entries()) {
+      const path = `materials[${index}]`;
+      if (!material.id) errors.push(`${path}.id is required.`);
+      if (materialsById.has(material.id)) errors.push(`Duplicate material id '${material.id}'.`);
+      materialsById.set(material.id, material);
+      if (!isFiniteNumberArray(material.baseColorTextureST) || material.baseColorTextureST.length !== 4) {
+        errors.push(`${path}.baseColorTextureST must contain 4 finite values.`);
       }
     }
   }
@@ -312,7 +360,7 @@ export function validateDocument(value: unknown): ValidationResult {
         continue;
       }
       for (const [trackIndex, track] of animation.tracks.entries()) {
-        validateAnimationTrack(track, `${path}.tracks[${trackIndex}]`, nodesById, meshesById, v3, errors);
+        validateAnimationTrack(track, `${path}.tracks[${trackIndex}]`, nodesById, meshesById, materialsById, v3OrLater, v4, errors);
       }
     }
   }
@@ -381,20 +429,28 @@ function validateAnimationTrack(
   path: string,
   nodesById: Map<string, ThreeUnityNode>,
   meshesById: Map<string, ThreeUnityMesh>,
-  v3: boolean,
+  materialsById: Map<string, ThreeUnityMaterial>,
+  v3OrLater: boolean,
+  v4: boolean,
   errors: string[],
 ): void {
   const targetNode = nodesById.get(track.targetNodeId);
   if (!targetNode) errors.push(`${path} references missing target node '${track.targetNodeId}'.`);
-  const dimensions = track.property === "quaternion"
+  const transformDimensions = track.property === "quaternion"
     ? 4
     : track.property === "position" || track.property === "scale"
       ? 3
-      : v3 && track.property === "morphWeight"
-        ? 1
-        : 0;
-  if (dimensions === 0) errors.push(`${path}.property must be position, quaternion, scale${v3 ? ", or morphWeight" : ""}.`);
-  if (v3) {
+      : 0;
+  const materialDimensions = v4 ? materialAnimationDimensions(track.property) : 0;
+  const dimensions = transformDimensions || (v3OrLater && track.property === "morphWeight" ? 1 : 0) || materialDimensions;
+  if (dimensions === 0) {
+    const allowed = ["position", "quaternion", "scale"];
+    if (v3OrLater) allowed.push("morphWeight");
+    if (v4) allowed.push("materialBaseColor", "materialEmissive", "materialMetallic", "materialRoughness", "materialBaseMapST");
+    errors.push(`${path}.property must be ${allowed.join(", ")}.`);
+  }
+
+  if (v3OrLater) {
     if (!Number.isInteger(track.morphTargetIndex)) errors.push(`${path}.morphTargetIndex must be an integer.`);
     else if (track.property === "morphWeight") {
       const mesh = targetNode?.meshId ? meshesById.get(targetNode.meshId) : undefined;
@@ -403,14 +459,46 @@ function validateAnimationTrack(
         errors.push(`${path}.morphTargetIndex '${track.morphTargetIndex}' is out of range for mesh '${mesh.id}'.`);
       }
     } else if (track.morphTargetIndex !== -1) {
-      errors.push(`${path}.morphTargetIndex must be -1 for Transform tracks.`);
+      errors.push(`${path}.morphTargetIndex must be -1 for non-morph tracks.`);
     }
   }
+
+  if (v4) {
+    if (materialDimensions > 0) {
+      if (!Number.isInteger(track.materialIndex) || track.materialIndex < 0) {
+        errors.push(`${path}.materialIndex must be a non-negative integer for material tracks.`);
+      } else {
+        const mesh = targetNode?.meshId ? meshesById.get(targetNode.meshId) : undefined;
+        if (!mesh) {
+          errors.push(`${path} material target node '${track.targetNodeId}' must reference a mesh.`);
+        } else if (!Array.isArray(mesh.materialIds) || track.materialIndex >= mesh.materialIds.length) {
+          errors.push(`${path}.materialIndex '${track.materialIndex}' is out of range for mesh '${mesh.id}'.`);
+        } else {
+          const materialId = mesh.materialIds[track.materialIndex];
+          const material = materialsById.get(materialId);
+          if (!material) errors.push(`${path} references missing material '${materialId}'.`);
+          else if (track.property === "materialBaseMapST" && !material.baseColorTextureId) {
+            errors.push(`${path} materialBaseMapST target material '${materialId}' has no base color texture.`);
+          }
+          const groups = Array.isArray(mesh.groups) ? mesh.groups : [];
+          const sourceIndexIsUsed = groups.length > 0
+            ? groups.some((group) => group.materialIndex === track.materialIndex)
+            : track.materialIndex === 0;
+          if (!sourceIndexIsUsed) {
+            errors.push(`${path}.materialIndex '${track.materialIndex}' is not used by mesh '${mesh.id}' groups.`);
+          }
+        }
+      }
+    } else if (track.materialIndex !== -1) {
+      errors.push(`${path}.materialIndex must be -1 for non-material tracks.`);
+    }
+  }
+
   const validTimes = isFiniteNumberArray(track.times) && track.times.length > 0;
   if (!validTimes) errors.push(`${path}.times must contain finite values.`);
   else {
     for (let index = 1; index < track.times.length; index += 1) {
-      if (track.times[index] <= track.times[index - 1]) errors.push(`${path}.times must be strictly increasing.`);
+      if (track.times[index] < track.times[index - 1]) errors.push(`${path}.times must be monotonically non-decreasing.`);
     }
   }
   if (!isFiniteNumberArray(track.values) || dimensions > 0 && validTimes && track.values.length !== track.times.length * dimensions) {
@@ -418,6 +506,17 @@ function validateAnimationTrack(
   }
   if (track.interpolation !== "linear") errors.push(`${path}.interpolation must be 'linear'.`);
   if (track.baked !== true) errors.push(`${path}.baked must be true.`);
+}
+
+function materialAnimationDimensions(property: ThreeUnityAnimationProperty): number {
+  if (property === "materialBaseColor" || property === "materialBaseMapST") return 4;
+  if (property === "materialEmissive") return 3;
+  if (property === "materialMetallic" || property === "materialRoughness") return 1;
+  return 0;
+}
+
+function isTextureWrap(value: unknown): value is ThreeUnityTextureWrap {
+  return value === "repeat" || value === "clamp" || value === "mirror";
 }
 
 function isFiniteNumberArray(value: unknown): value is number[] {
