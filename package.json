@@ -37,6 +37,7 @@
     "example:animated": "npm run build && node examples/generate-skinned-animation.mjs",
     "example:morph": "npm run build && node examples/generate-morph-animation.mjs",
     "example:material": "npm run build && node examples/generate-material-animation.mjs",
+    "example:primitives": "npm run build && node examples/generate-primitives.mjs",
     "example:components": "npm run build && node examples/generate-component-binding.mjs",
     "conversions:capture": "node conversion-tools/capture-games.mjs"
   },

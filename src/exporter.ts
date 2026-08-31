@@ -7,17 +7,20 @@ import {
   ClampToEdgeWrapping,
   Color,
   FrontSide,
+  Line,
   LoopOnce,
   Material,
   Mesh,
   MeshStandardMaterial,
   MirroredRepeatWrapping,
   Object3D,
+  Points,
   PropertyBinding,
   Quaternion,
   RepeatWrapping,
   Scene,
   SkinnedMesh,
+  Sprite,
   Texture,
   Vector3,
 } from "three";
@@ -35,6 +38,8 @@ import {
   ThreeUnityMesh,
   ThreeUnityMorphTarget,
   ThreeUnityNode,
+  ThreeUnityPrimitive,
+  ThreeUnityPrimitiveType,
   ThreeUnityRuntime,
   ThreeUnitySkin,
   ThreeUnityTexture,
@@ -73,18 +78,20 @@ export async function exportThreeUnity(
 ): Promise<ThreeUnityDocument> {
   const nodes: ThreeUnityNode[] = [];
   const meshes: ThreeUnityMesh[] = [];
+  const primitives: ThreeUnityPrimitive[] = [];
   const skins: ThreeUnitySkin[] = [];
   const materials: ThreeUnityMaterial[] = [];
   const textures: ThreeUnityTexture[] = [];
   const warnings: string[] = [];
-  const warnedRenderableTypes = new Set<string>();
   const meshIds = new Map<string, string>();
+  const primitiveIds = new Map<string, string>();
   const morphTargetNamesByMeshId = new Map<string, string[]>();
   const morphTargetNamesByObject = new Map<Object3D, string[]>();
   const skinIds = new Map<SkinnedMesh, string>();
   const materialIds = new Map<Material, string>();
   const textureIds = new Map<Texture, string>();
   const visitedObjects = new Set<Object3D>();
+  const exportedMaterialObjects = new Set<Object3D>();
   const requiredBones = new Set<Object3D>();
   const nodeIdFor = (object: Object3D): string => stableId("node", object.uuid, 0);
 
@@ -113,12 +120,39 @@ export async function exportThreeUnity(
     const id = stableId("material", material.uuid, materialIds.size);
     materialIds.set(material, id);
     const standard = material as MeshStandardMaterial;
-    if (!new Set(["MeshBasicMaterial", "MeshStandardMaterial", "MeshPhysicalMaterial", "MeshLambertMaterial", "MeshPhongMaterial"]).has(material.type)) {
+    const renderMode = materialRenderMode(material);
+    if (renderMode === "surface" && !new Set(["MeshBasicMaterial", "MeshStandardMaterial", "MeshPhysicalMaterial", "MeshLambertMaterial", "MeshPhongMaterial"]).has(material.type)) {
       warnings.push(`${material.name || material.uuid}: ${material.type} is approximated with a Unity Lit material.`);
     }
+    const primitiveMaterial = material as Material & {
+      alphaMap?: Texture | null;
+      linewidth?: number;
+      map?: Texture | null;
+      rotation?: number;
+      size?: number;
+      sizeAttenuation?: boolean;
+    };
+    if (renderMode === "line" && primitiveMaterial.linewidth !== undefined && primitiveMaterial.linewidth !== 1) {
+      warnings.push(`Material '${material.name || material.uuid}' linewidth '${primitiveMaterial.linewidth}' is not converted; Unity uses 1-pixel lines.`);
+    }
+    if (renderMode === "line" && primitiveMaterial.map) {
+      warnings.push(`Material '${material.name || material.uuid}' LineBasicMaterial.map is not converted.`);
+    }
+    if ((renderMode === "points" || renderMode === "sprite") && primitiveMaterial.alphaMap) {
+      warnings.push(`Material '${material.name || material.uuid}' alphaMap is not converted.`);
+    }
+    const pointSize = renderMode === "points" ? primitiveMaterial.size ?? 1 : 1;
+    if (!Number.isFinite(pointSize) || pointSize <= 0) {
+      throw new Error(`PointsMaterial '${material.name || material.uuid}' size must be a positive finite number, received '${pointSize}'.`);
+    }
+    const spriteRotation = renderMode === "sprite" ? primitiveMaterial.rotation ?? 0 : 0;
+    if (!Number.isFinite(spriteRotation)) {
+      throw new Error(`SpriteMaterial '${material.name || material.uuid}' rotation must be finite, received '${spriteRotation}'.`);
+    }
+    const baseColorTexture = renderMode === "line" ? null : primitiveMaterial.map ?? standard.map;
     const baseColor = readColor((material as Material & { color?: Color }).color, [1, 1, 1]);
-    const emissive = readColor(standard.emissive, [0, 0, 0]);
-    const baseColorTextureST = readBaseColorTextureST(material, standard.map, warnings);
+    const emissive = renderMode === "surface" ? readColor(standard.emissive, [0, 0, 0]) : [0, 0, 0] as [number, number, number];
+    const baseColorTextureST = readBaseColorTextureST(material, baseColorTexture, warnings);
     const converted: ThreeUnityMaterial = {
       id,
       name: material.name || id,
@@ -131,15 +165,19 @@ export async function exportThreeUnity(
       transparent: material.transparent,
       // Unity v1 has no back-side-only mode; two-sided is the closest safe
       // representation for Three.js BackSide materials such as sky domes.
-      doubleSided: material.side !== FrontSide,
+      doubleSided: renderMode === "surface" ? material.side !== FrontSide : true,
       alphaCutoff: material.alphaTest,
-      unlit: material.type === "MeshBasicMaterial" || Boolean((material as Material & { isMeshBasicMaterial?: boolean }).isMeshBasicMaterial),
+      unlit: renderMode !== "surface" || material.type === "MeshBasicMaterial" || Boolean((material as Material & { isMeshBasicMaterial?: boolean }).isMeshBasicMaterial),
       vertexColors: Boolean((material as Material & { vertexColors?: boolean }).vertexColors),
-      baseColorTextureId: await registerTexture(standard.map),
+      baseColorTextureId: await registerTexture(baseColorTexture),
       baseColorTextureST,
-      emissiveTextureId: await registerTexture(standard.emissiveMap),
-      normalTextureId: await registerTexture(standard.normalMap),
-      metallicRoughnessTextureId: await registerTexture(standard.metalnessMap || standard.roughnessMap),
+      emissiveTextureId: renderMode === "surface" ? await registerTexture(standard.emissiveMap) : "",
+      normalTextureId: renderMode === "surface" ? await registerTexture(standard.normalMap) : "",
+      metallicRoughnessTextureId: renderMode === "surface" ? await registerTexture(standard.metalnessMap || standard.roughnessMap) : "",
+      renderMode,
+      pointSize,
+      sizeAttenuation: renderMode === "points" || renderMode === "sprite" ? primitiveMaterial.sizeAttenuation ?? true : true,
+      spriteRotation,
     };
     materials.push(converted);
     return id;
@@ -182,6 +220,104 @@ export async function exportThreeUnity(
       morphTargets,
     });
     morphTargetNamesByMeshId.set(id, morphTargetNames);
+    return id;
+  };
+
+  const registerLinePrimitive = async (line: Line): Promise<string | undefined> => {
+    const lineMaterials = Array.isArray(line.material) ? line.material : [line.material];
+    const unsupportedMaterial = lineMaterials.find((material) => material.type !== "LineBasicMaterial");
+    if (unsupportedMaterial) {
+      warnings.push(
+        `${line.name || line.uuid}: ${unsupportedMaterial.type} is not supported for ${line.type}; the object is preserved as a transform only.`,
+      );
+      return undefined;
+    }
+    const type = linePrimitiveType(line);
+    const key = `${type}|${line.geometry.uuid}|${lineMaterials.map((material) => material.uuid).join("|")}`;
+    const existing = primitiveIds.get(key);
+    if (existing) return existing;
+    const position = requiredPrimitivePosition(line.geometry, line);
+    const sourceIndices = primitiveSourceIndices(line.geometry, position.count, line);
+    const { indices, groups } = canonicalPrimitiveGroups(type, line.geometry, sourceIndices, lineMaterials.length, line, warnings);
+    const color = line.geometry.getAttribute("color") as BufferAttribute | undefined;
+    if (hasMorphAttributes(line.geometry)) warnings.push(`${line.name || line.uuid}: Line morph targets are not exported; the base Line is preserved.`);
+    const id = stablePrimitiveId(key);
+    primitiveIds.set(key, id);
+    primitives.push({
+      id,
+      name: line.geometry.name || line.name || id,
+      type,
+      positions: attributeToArray(position, 3, 0, `${line.name || line.uuid} position`),
+      colors: color ? primitiveColorsToArray(color, line) : [],
+      indices,
+      groups,
+      materialIds: await Promise.all(lineMaterials.map(registerMaterial)),
+      spriteCenter: [0.5, 0.5],
+    });
+    return id;
+  };
+
+  const registerPointsPrimitive = async (points: Points): Promise<string | undefined> => {
+    const pointsMaterials = Array.isArray(points.material) ? points.material : [points.material];
+    const unsupportedMaterial = pointsMaterials.find((material) => material.type !== "PointsMaterial");
+    if (unsupportedMaterial) {
+      warnings.push(
+        `${points.name || points.uuid}: ${unsupportedMaterial.type} is not supported for Points; the object is preserved as a transform only.`,
+      );
+      return undefined;
+    }
+    const key = `points|${points.geometry.uuid}|${pointsMaterials.map((material) => material.uuid).join("|")}`;
+    const existing = primitiveIds.get(key);
+    if (existing) return existing;
+    const position = requiredPrimitivePosition(points.geometry, points);
+    const sourceIndices = primitiveSourceIndices(points.geometry, position.count, points);
+    const { indices, groups } = canonicalPrimitiveGroups("points", points.geometry, sourceIndices, pointsMaterials.length, points, warnings);
+    const color = points.geometry.getAttribute("color") as BufferAttribute | undefined;
+    if (hasMorphAttributes(points.geometry)) warnings.push(`${points.name || points.uuid}: Points morph targets are not exported; the base Points are preserved.`);
+    for (const attributeName of ["size", "rotation"]) {
+      if (points.geometry.getAttribute(attributeName)) {
+        warnings.push(`${points.name || points.uuid}: per-point '${attributeName}' attributes are not exported.`);
+      }
+    }
+    const id = stablePrimitiveId(key);
+    primitiveIds.set(key, id);
+    primitives.push({
+      id,
+      name: points.geometry.name || points.name || id,
+      type: "points",
+      positions: attributeToArray(position, 3, 0, `${points.name || points.uuid} position`),
+      colors: color ? primitiveColorsToArray(color, points) : [],
+      indices,
+      groups,
+      materialIds: await Promise.all(pointsMaterials.map(registerMaterial)),
+      spriteCenter: [0.5, 0.5],
+    });
+    return id;
+  };
+
+  const registerSpritePrimitive = async (sprite: Sprite): Promise<string | undefined> => {
+    if (sprite.material.type !== "SpriteMaterial") {
+      warnings.push(`${sprite.name || sprite.uuid}: ${sprite.material.type} is not supported for Sprite; the object is preserved as a transform only.`);
+      return undefined;
+    }
+    const center: [number, number] = [sprite.center.x, sprite.center.y];
+    if (!center.every(Number.isFinite)) throw new Error(`Sprite '${sprite.name || sprite.uuid}' center must contain finite values.`);
+    const key = `sprite|${sprite.material.uuid}|${center[0]},${center[1]}`;
+    const existing = primitiveIds.get(key);
+    if (existing) return existing;
+    const id = stablePrimitiveId(key);
+    primitiveIds.set(key, id);
+    primitives.push({
+      id,
+      name: sprite.name || id,
+      type: "sprite",
+      positions: [],
+      colors: [],
+      indices: [],
+      groups: [],
+      materialIds: [await registerMaterial(sprite.material)],
+      spriteCenter: center,
+    });
     return id;
   };
 
@@ -231,25 +367,31 @@ export async function exportThreeUnity(
       scale: [object.scale.x, object.scale.y, object.scale.z],
       layersMask: object.layers.mask,
       meshId: "",
+      primitiveId: "",
       skinId: "",
       morphWeights: [],
       metadataJson: safeJson(metadata),
       components,
     };
     const isInstancedMesh = Boolean((object as Mesh & { isInstancedMesh?: boolean }).isInstancedMesh);
-    if ((object as Mesh).isMesh && !isInstancedMesh) {
+    const fatLine = isUnsupportedFatLine(object);
+    if ((object as Mesh).isMesh && !isInstancedMesh && !fatLine) {
       node.meshId = await registerMesh(object as Mesh);
       const morphTargetNames = morphTargetNamesByMeshId.get(node.meshId) ?? [];
       node.morphWeights = readMorphWeights(object as Mesh, morphTargetNames);
       if (morphTargetNames.length > 0) morphTargetNamesByObject.set(object, morphTargetNames);
       if ((object as SkinnedMesh).isSkinnedMesh) node.skinId = registerSkin(object as SkinnedMesh, id);
     }
-    if (!(object as Mesh).isMesh && isUnsupportedRenderable(object)) {
-      if (!warnedRenderableTypes.has(object.type)) {
-        warnings.push(`${object.type} renderables are preserved as transforms only in format v4.`);
-        warnedRenderableTypes.add(object.type);
-      }
+    if (fatLine) {
+      warnings.push(`${object.name || object.uuid}: ${object.type} fat-line renderables are preserved as transforms only.`);
+    } else if (isLineLike(object)) {
+      node.primitiveId = await registerLinePrimitive(object as Line) ?? "";
+    } else if (isPoints(object)) {
+      node.primitiveId = await registerPointsPrimitive(object as Points) ?? "";
+    } else if (isSprite(object)) {
+      node.primitiveId = await registerSpritePrimitive(object as Sprite) ?? "";
     }
+    if ((node.meshId || node.primitiveId) && !isInstancedMesh) exportedMaterialObjects.add(object);
     if ((object as Camera).isCamera) node.camera = exportCamera(object as Camera);
     if ((object as Object3D & { isLight?: boolean }).isLight) node.light = exportLight(object as Object3D & LightLike);
     nodes.push(node);
@@ -267,7 +409,7 @@ export async function exportThreeUnity(
     const parentId = detachedRoot.parent && visitedObjects.has(detachedRoot.parent) ? nodeIdFor(detachedRoot.parent) : "";
     await visit(detachedRoot, parentId, true);
   }
-  const materialSlots = collectExportedMaterialSlots(visitedObjects);
+  const materialSlots = collectExportedMaterialSlots(exportedMaterialObjects);
   const animationResult = exportAnimations(
     root,
     options.animations ?? root.animations,
@@ -287,6 +429,7 @@ export async function exportThreeUnity(
     unitScaleMeters: options.unitScaleMeters ?? 1,
     nodes,
     meshes,
+    primitives,
     skins,
     animations: animationResult.animations,
     defaultAnimationId: animationResult.defaultAnimationId,
@@ -317,7 +460,7 @@ type ThreeUnityMaterialAnimationProperty = Extract<
 >;
 
 interface ExportedMaterialSlot {
-  object: Mesh;
+  object: Object3D;
   materialIndex: number;
   material: Material;
 }
@@ -360,6 +503,7 @@ function exportAnimations(
   if (!Number.isFinite(sampleRate) || sampleRate <= 0) throw new Error(`animationSampleRate must be a positive finite number, received '${sampleRate}'.`);
   const exportedObjects = [...visitedObjects];
   const exportedObjectSet = new Set(exportedObjects);
+  const exportedMaterialObjectSet = new Set(materialSlots.map((slot) => slot.object));
   const animations: ThreeUnityAnimation[] = [];
   const sourceByAnimationId = new Map<string, AnimationClip>();
 
@@ -412,7 +556,7 @@ function exportAnimations(
       } else if (transformProperty) {
         properties.add(transformProperty);
       } else if (materialProperty) {
-        if (!target || !validateMaterialSourceTrackTarget(target as Object3D, parsed, clip, track.name, warnings)) return false;
+        if (!target || !validateMaterialSourceTrackTarget(target as Object3D, parsed, clip, track.name, exportedMaterialObjectSet, warnings)) return false;
         samplesMaterials = true;
       }
       return true;
@@ -663,21 +807,21 @@ function isTransformAnimationProperty(value: string): value is ThreeUnityTransfo
 function collectExportedMaterialSlots(objects: Set<Object3D>): ExportedMaterialSlot[] {
   const slots: ExportedMaterialSlot[] = [];
   for (const object of objects) {
-    const mesh = object as Mesh & { isInstancedMesh?: boolean };
-    if (!mesh.isMesh || mesh.isInstancedMesh) continue;
-    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-    const materialIndices = Array.isArray(mesh.material)
-      ? mesh.geometry.groups.length > 0
-        ? [...new Set(mesh.geometry.groups.map((group) => group.materialIndex ?? 0))]
+    const renderable = object as MaterialRenderable;
+    const materials = Array.isArray(renderable.material) ? renderable.material : [renderable.material];
+    const groups = renderable.geometry?.groups ?? [];
+    const materialIndices = Array.isArray(renderable.material)
+      ? groups.length > 0
+        ? [...new Set(groups.map((group) => group.materialIndex ?? 0))]
         : [0]
       : [0];
     for (const materialIndex of materialIndices) {
       if (!Number.isInteger(materialIndex) || materialIndex < 0 || materialIndex >= materials.length) {
         throw new Error(
-          `Mesh '${mesh.name || mesh.uuid}' uses source material index '${materialIndex}' but has ${materials.length} material slot(s).`,
+          `Renderable '${object.name || object.uuid}' uses source material index '${materialIndex}' but has ${materials.length} material slot(s).`,
         );
       }
-      slots.push({ object: mesh, materialIndex, material: materials[materialIndex] });
+      slots.push({ object, materialIndex, material: materials[materialIndex] });
     }
   }
   return slots;
@@ -702,18 +846,22 @@ function validateMaterialSourceTrackTarget(
   parsed: ReturnType<typeof PropertyBinding.parseTrackName>,
   clip: AnimationClip,
   trackName: string,
+  exportedMaterialObjects: Set<Object3D>,
   warnings: string[],
 ): boolean {
   const label = `${clip.name || clip.uuid}: track '${trackName}'`;
-  const mesh = target as Mesh & { isInstancedMesh?: boolean };
-  if (!mesh.isMesh || mesh.isInstancedMesh) {
-    warnings.push(`${label} must resolve to an exported non-instanced Mesh.`);
+  if (!exportedMaterialObjects.has(target)) {
+    warnings.push(`${label} must resolve to an exported Mesh or primitive.`);
     return false;
   }
-  const materialValue = mesh.material;
+  const materialValue = (target as MaterialRenderable).material;
   if (parsed.objectName === "map") {
     if (Array.isArray(materialValue)) {
       warnings.push(`${label} targets multi-material base-map UV animation, which is not supported.`);
+      return false;
+    }
+    if (materialRenderMode(materialValue) === "line") {
+      warnings.push(`${label} targets unsupported LineBasicMaterial map animation.`);
       return false;
     }
     const map = (materialValue as MeshStandardMaterial).map;
@@ -732,19 +880,24 @@ function validateMaterialSourceTrackTarget(
     }
     const materialIndex = Number(parsed.objectIndex);
     if (!Number.isInteger(materialIndex) || materialIndex < 0 || materialIndex >= materialValue.length) {
-      warnings.push(`${label} references source material index '${parsed.objectIndex}', but the Mesh has ${materialValue.length} material(s).`);
+      warnings.push(`${label} references source material index '${parsed.objectIndex}', but the renderable has ${materialValue.length} material(s).`);
       return false;
     }
     material = materialValue[materialIndex];
   } else {
     if (parsed.objectIndex !== undefined) {
-      warnings.push(`${label} specifies source material index '${parsed.objectIndex}' for a single-material Mesh.`);
+      warnings.push(`${label} specifies source material index '${parsed.objectIndex}' for a single-material renderable.`);
       return false;
     }
     material = materialValue;
   }
 
   const standard = material as MeshStandardMaterial;
+  const renderMode = materialRenderMode(material);
+  if (renderMode !== "surface" && (parsed.propertyName === "emissive" || parsed.propertyName === "metalness" || parsed.propertyName === "roughness")) {
+    warnings.push(`${label} targets unsupported ${material.type} property '${parsed.propertyName}'.`);
+    return false;
+  }
   const supported = parsed.propertyName === "color"
     ? Boolean((material as Material & { color?: Color }).color)
     : parsed.propertyName === "opacity"
@@ -843,9 +996,35 @@ function normalizeRuntime(runtime: Partial<ThreeUnityRuntime> | undefined): Thre
   };
 }
 
-function isUnsupportedRenderable(object: Object3D): boolean {
-  const value = object as Object3D & { isLine?: boolean; isPoints?: boolean; isSprite?: boolean };
-  return Boolean(value.isLine || value.isPoints || value.isSprite);
+function isLineLike(object: Object3D): boolean {
+  return Boolean((object as Object3D & { isLine?: boolean }).isLine);
+}
+
+function isPoints(object: Object3D): boolean {
+  return Boolean((object as Object3D & { isPoints?: boolean }).isPoints);
+}
+
+function isSprite(object: Object3D): boolean {
+  return Boolean((object as Object3D & { isSprite?: boolean }).isSprite);
+}
+
+function isUnsupportedFatLine(object: Object3D): boolean {
+  const value = object as Object3D & { isLine2?: boolean; isLineSegments2?: boolean };
+  return Boolean(value.isLine2 || value.isLineSegments2 || object.type === "Line2" || object.type === "LineSegments2");
+}
+
+function linePrimitiveType(line: Line): Extract<ThreeUnityPrimitiveType, "line" | "line-segments" | "line-loop"> {
+  const value = line as Line & { isLineLoop?: boolean; isLineSegments?: boolean };
+  if (value.isLineSegments) return "line-segments";
+  if (value.isLineLoop) return "line-loop";
+  return "line";
+}
+
+function materialRenderMode(material: Material): ThreeUnityMaterial["renderMode"] {
+  if (material.type === "LineBasicMaterial") return "line";
+  if (material.type === "PointsMaterial") return "points";
+  if (material.type === "SpriteMaterial") return "sprite";
+  return "surface";
 }
 
 export async function exportThreeUnityJson(root: Scene | Object3D, options: ThreeUnityExportOptions = {}): Promise<string> {
@@ -907,6 +1086,11 @@ interface InstancedMeshLike {
   getMatrixAt(index: number, matrix: import("three").Matrix4): void;
 }
 
+interface MaterialRenderable extends Object3D {
+  material: Material | Material[];
+  geometry?: BufferGeometry;
+}
+
 function exportLight(light: LightLike): ThreeUnityLight {
   let type: ThreeUnityLight["type"] = "point";
   if (light.isDirectionalLight) type = "directional";
@@ -952,13 +1136,14 @@ async function exportInstances(
       scale: [scale.x, scale.y, scale.z],
       layersMask: object.layers.mask,
       meshId,
+      primitiveId: "",
       skinId: "",
       morphWeights: Array.from({ length: morphTargetCount }, () => 0),
       metadataJson: `{\"threeUnityInstance\":${index}}`,
       components: [],
     });
   }
-  if (object.instanceColor) warnings.push(`${object.name || object.uuid}: per-instance colors are not exported in format v4.`);
+  if (object.instanceColor) warnings.push(`${object.name || object.uuid}: per-instance colors are not exported in format v5.`);
 }
 
 function readMorphAttributes(mesh: Mesh, semantic: "position" | "normal"): BufferAttribute[] {
@@ -1113,11 +1298,107 @@ function requiredAttribute(geometry: BufferGeometry, name: string): BufferAttrib
   return value as BufferAttribute;
 }
 
-function attributeToArray(attribute: BufferAttribute, targetItemSize = attribute.itemSize, fill = 0): number[] {
+function requiredPrimitivePosition(geometry: BufferGeometry, object: Object3D): BufferAttribute {
+  const position = requiredAttribute(geometry, "position");
+  if (position.itemSize !== 3) {
+    throw new Error(`${object.type} '${object.name || object.uuid}' position attribute must have itemSize 3, received ${position.itemSize}.`);
+  }
+  if (position.count === 0) throw new Error(`${object.type} '${object.name || object.uuid}' position attribute must not be empty.`);
+  return position;
+}
+
+function primitiveSourceIndices(geometry: BufferGeometry, vertexCount: number, object: Object3D): number[] {
+  const source = geometry.index
+    ? attributeToArray(geometry.index, 1, 0, `${object.name || object.uuid} index`)
+    : Array.from({ length: vertexCount }, (_, index) => index);
+  for (const [offset, index] of source.entries()) {
+    if (!Number.isInteger(index) || index < 0 || index >= vertexCount) {
+      throw new Error(`${object.type} '${object.name || object.uuid}' index ${offset} must be an integer in [0, ${vertexCount}), received '${index}'.`);
+    }
+  }
+  return source;
+}
+
+function canonicalPrimitiveGroups(
+  type: Exclude<ThreeUnityPrimitiveType, "sprite">,
+  geometry: BufferGeometry,
+  sourceIndices: number[],
+  materialCount: number,
+  object: Object3D,
+  warnings: string[],
+): Pick<ThreeUnityPrimitive, "indices" | "groups"> {
+  const sourceGroups = geometry.groups.length > 0
+    ? geometry.groups
+    : [{ start: 0, count: sourceIndices.length, materialIndex: 0 }];
+  const indices: number[] = [];
+  const groups: ThreeUnityPrimitive["groups"] = [];
+  for (const [groupIndex, group] of sourceGroups.entries()) {
+    const materialIndex = group.materialIndex ?? 0;
+    if (!Number.isInteger(materialIndex) || materialIndex < 0 || materialIndex >= materialCount) {
+      throw new Error(
+        `${object.type} '${object.name || object.uuid}' group ${groupIndex} references material index '${materialIndex}' but has ${materialCount} material slot(s).`,
+      );
+    }
+    if (!Number.isInteger(group.start) || group.start < 0 || !Number.isInteger(group.count) || group.count < 0 || group.start + group.count > sourceIndices.length) {
+      throw new Error(
+        `${object.type} '${object.name || object.uuid}' group ${groupIndex} start/count '${group.start}/${group.count}' is outside the source index stream (${sourceIndices.length}).`,
+      );
+    }
+    const sourceGroupIndices = sourceIndices.slice(group.start, group.start + group.count);
+    const canonical = type === "points"
+      ? sourceGroupIndices
+      : canonicalLineIndices(type, sourceGroupIndices, object, groupIndex, warnings);
+    groups.push({ start: indices.length, count: canonical.length, materialIndex });
+    indices.push(...canonical);
+  }
+  return { indices, groups };
+}
+
+function canonicalLineIndices(
+  type: Exclude<ThreeUnityPrimitiveType, "points" | "sprite">,
+  source: number[],
+  object: Object3D,
+  groupIndex: number,
+  warnings: string[],
+): number[] {
+  if (type === "line-segments") {
+    if (source.length % 2 !== 0) {
+      throw new Error(`${object.type} '${object.name || object.uuid}' group ${groupIndex} has odd index count ${source.length}.`);
+    }
+    return [...source];
+  }
+  if (type === "line-loop" && source.length < 2) {
+    warnings.push(`${object.type} '${object.name || object.uuid}' group ${groupIndex} has fewer than 2 vertices and produces no segments.`);
+    return [];
+  }
+  const canonical: number[] = [];
+  for (let index = 1; index < source.length; index += 1) canonical.push(source[index - 1], source[index]);
+  if (type === "line-loop" && source.length >= 2) canonical.push(source[source.length - 1], source[0]);
+  return canonical;
+}
+
+function primitiveColorsToArray(attribute: BufferAttribute, object: Line | Points): number[] {
+  if (attribute.itemSize !== 3 && attribute.itemSize !== 4) {
+    throw new Error(`${object.type} '${object.name || object.uuid}' color attribute must have itemSize 3 or 4, received ${attribute.itemSize}.`);
+  }
+  const vertexCount = requiredAttribute(object.geometry, "position").count;
+  if (attribute.count !== vertexCount) {
+    throw new Error(`${object.type} '${object.name || object.uuid}' color count ${attribute.count} does not match position count ${vertexCount}.`);
+  }
+  return attributeToArray(attribute, 4, 1, `${object.name || object.uuid} color`);
+}
+
+function hasMorphAttributes(geometry: BufferGeometry): boolean {
+  return Object.values(geometry.morphAttributes).some((attributes) => Array.isArray(attributes) && attributes.length > 0);
+}
+
+function attributeToArray(attribute: BufferAttribute, targetItemSize = attribute.itemSize, fill = 0, label?: string): number[] {
   const output: number[] = [];
   for (let index = 0; index < attribute.count; index += 1) {
     for (let component = 0; component < targetItemSize; component += 1) {
-      output.push(component < attribute.itemSize ? attribute.getComponent(index, component) : fill);
+      const value = component < attribute.itemSize ? attribute.getComponent(index, component) : fill;
+      if (label && !Number.isFinite(value)) throw new Error(`${label} contains a non-finite value at item ${index}, component ${component}.`);
+      output.push(value);
     }
   }
   return output;
@@ -1162,6 +1443,10 @@ function stableId(prefix: string, uuid: string, fallback: number): string {
   return `${prefix}_${uuid ? uuid.replaceAll("-", "") : fallback}`;
 }
 
+function stablePrimitiveId(key: string): string {
+  return `primitive_${encodeURIComponent(key).replaceAll("%", "_").replaceAll("-", "m").replaceAll(".", "p")}`;
+}
+
 function safeJson(value: unknown): string {
   try {
     return JSON.stringify(value ?? {});
@@ -1176,12 +1461,12 @@ async function encodeTexture(texture: Texture, warnings: string[]): Promise<Pick
   const height = image?.height ?? 0;
   if (image?.data && width > 0 && height > 0) {
     if (!(image.data instanceof Uint8Array) && !(image.data instanceof Uint8ClampedArray)) {
-      warnings.push(`${texture.name || texture.uuid}: only unsigned-byte DataTexture is supported in format v4.`);
+      warnings.push(`${texture.name || texture.uuid}: only unsigned-byte DataTexture is supported in format v5.`);
       return { width, height, encoding: "rgba8", data: "" };
     }
     const bytes = image.data instanceof Uint8Array ? image.data : new Uint8Array(image.data);
     if (bytes.length !== width * height * 4) {
-      warnings.push(`${texture.name || texture.uuid}: only 4-channel Uint8 DataTexture is supported in format v4.`);
+      warnings.push(`${texture.name || texture.uuid}: only 4-channel Uint8 DataTexture is supported in format v5.`);
       return { width, height, encoding: "rgba8", data: "" };
     }
     return { width, height, encoding: "rgba8", data: bytesToBase64(bytes) };

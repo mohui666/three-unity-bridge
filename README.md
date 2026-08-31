@@ -9,12 +9,12 @@
 </p>
 
 <p align="center">
-  将受支持的 Three.js 场景、动画、Morph Target 与材质动画转换为 Unity 原生资产，<br>
+  将受支持的 Three.js 场景、动画、Morph Target、材质动画与非网格 Primitive 转换为 Unity 原生资产，<br>
   或把原始 Web 游戏原样封装进 Windows Player，再按需把确定性逻辑交给 Unity。
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/.threeunity-v4-7C3AED?style=flat-square" alt=".threeunity format v4">
+  <img src="https://img.shields.io/badge/.threeunity-v5-7C3AED?style=flat-square" alt=".threeunity format v5">
   <img src="https://img.shields.io/badge/UPM-0.1.0-2563EB?style=flat-square&logo=unity" alt="UPM 0.1.0">
   <img src="https://img.shields.io/badge/Unity-2021.3%2B-111827?style=flat-square&logo=unity" alt="Unity 2021.3 or newer">
   <img src="https://img.shields.io/badge/Node.js-20%2B-15803D?style=flat-square&logo=nodedotjs" alt="Node.js 20 or newer">
@@ -46,7 +46,7 @@
 
 ### 路径 A：Unity 原生资产
 
-导出器读取 Three.js Scene/Object3D，把受支持的层级、Mesh、材质、纹理、Camera、Light、Skin、动画与 Morph Target 写入版本化 `.threeunity`。Unity `ScriptedImporter` 再生成可拖入 Scene 的 Prefab 型主资产，以及 Mesh、Material、Texture、AnimationClip 等子资产；材质动画由同一个播放器按 Animation 时间通过 `MaterialPropertyBlock` 应用。
+导出器读取 Three.js Scene/Object3D，把受支持的层级、Mesh、Line、Points、Sprite、材质、纹理、Camera、Light、Skin、动画与 Morph Target 写入版本化 `.threeunity`。Unity `ScriptedImporter` 再生成可拖入 Scene 的 Prefab 型主资产，以及 Mesh、Material、Texture、AnimationClip 等子资产；材质动画由同一个播放器按 Animation 时间通过 `MaterialPropertyBlock` 应用。
 
 ### 路径 B：完整 Web 体验
 
@@ -58,9 +58,9 @@ Web Bridge 把源 `dist` 的内容和相对路径原样放入 `StreamingAssets`�
 flowchart LR
   subgraph Asset["路径 A · 原生资产转换"]
     Scene["Three.js Scene"] --> Exporter["TypeScript Exporter / CLI"]
-    Exporter --> Document[".threeunity v4"]
+    Exporter --> Document[".threeunity v5"]
     Document --> Importer["Unity ScriptedImporter"]
-    Importer --> Assets["Prefab · Mesh · Material<br/>AnimationClip · BlendShape"]
+    Importer --> Assets["Prefab · Mesh · Material<br/>Line · Points · Sprite<br/>AnimationClip · BlendShape"]
     Assets --> NativePlayer["Unity Player"]
   end
 
@@ -91,7 +91,9 @@ flowchart LR
 | 能力 | 资产转换 | Web Bridge |
 |---|:---:|:---:|
 | Mesh、Submesh、Normal、UV、Vertex Color | ✅ Unity 原生资产 | ✅ 原版 Web 渲染 |
-| 基础材质、可嵌入纹理与 base-map wrap/ST | ✅ Format v4 | ✅ 原样保留 |
+| Line / LineSegments / LineLoop | ✅ Format v5，`MeshTopology.Lines` | ✅ 原版 Web 渲染 |
+| Points / Sprite | ✅ Format v5，camera-facing quad | ✅ 原版 Web 渲染 |
+| 基础材质、可嵌入纹理与 base-map wrap/ST | ✅ Format v4+ | ✅ 原样保留 |
 | Perspective / Orthographic Camera、Light | ✅ | ✅ 原样保留 |
 | Skeleton、四权重 Skinning、Bind Pose | ✅ Format v2+ | ✅ 原样保留 |
 | Position / Quaternion / Scale 动画 | ✅ Format v2+ | ✅ 原样保留 |
@@ -115,7 +117,19 @@ flowchart LR
 - Web Bridge 额外需要 .NET 8 SDK 与 WebView2 Evergreen Runtime
 - 当前仓库验证环境：Unity `6000.3.22f1`
 
-### 最短路径体验材质与 UV 动画
+### Line / Points / Sprite 可见闭环
+
+```powershell
+npm install
+npm run example:primitives
+node .\dist\cli.js validate .\examples\output\non-mesh-primitives.threeunity
+```
+
+这会生成完全程序化的 v5 资产：连续折线、四条互不连接的线段、闭合五边形、带两组材质和逐点颜色的确定性点云，以及两个 center、rotation、scale 与 size attenuation 均不同的贴图 Sprite。嵌入式非对称 `DataTexture` 不依赖图片或网络。
+
+也可以在 Unity Package Manager 选择 **Add package from disk**，打开 `unity-package/package.json`，再从 **Samples** 导入 **Line Points Sprite**。把 `non-mesh-primitives.threeunity` 拖入 Scene 并进入 Play Mode；默认动画会旋转 Line、浮动 Points、改变 Sprite scale，并通过 `MaterialPropertyBlock` 循环改变 Sprite 的颜色和透明度。
+
+### 材质与 UV 动画
 
 ```powershell
 npm install
@@ -201,7 +215,8 @@ node .\dist\cli.js build-web-unity `
 | v1 | 静态层级、Mesh、材质、纹理、Camera、Light | importer 继续接受 |
 | v2 | SkinnedMesh、四权重、Bind Pose、Transform Animation | importer 继续接受 |
 | v3 | Morph Target delta、初始 morph weights、morphWeight Animation | importer 继续接受 |
-| v4 | 纹理 wrap/ST、材质属性与基础纹理 UV 动画 | 当前 exporter 输出 |
+| v4 | 纹理 wrap/ST、材质属性与基础纹理 UV 动画 | importer 继续接受 |
+| v5 | Line、LineSegments、LineLoop、Points、Sprite 与 primitive 材质 | 当前 exporter 输出 |
 
 > [!NOTE]
 > npm 与 UPM 元数据当前仍为 `0.1.0`；格式版本、ScriptedImporter revision 与软件版本是三套独立概念。
@@ -209,6 +224,9 @@ node .\dist\cli.js build-web-unity `
 关键规则：
 
 - Three.js 与 Unity 都是 Y-up，但手性不同；importer 镜像 Z，并把每个三角形绕序反转一次。
+- Line 在导出时规范化为明确的 segment pairs，Unity 以 `MeshTopology.Lines` 导入；`LineSegments` 不会跨 pair 串联，`LineLoop` 会为每个 group 独立闭合。
+- Points 由单一 Renderer 的 camera-facing quads 表示，并保留 point size、size attenuation、纹理、逐点颜色与 material groups；Sprite quad 在 shader 中面向当前 Camera，并保留 center、scale、rotation 与 attenuation。
+- Points 与 Sprite 的 importer bounds 使用由点尺寸或 sprite corner 推导的有限保守范围；极端 FOV 或超大 screen-space primitive 仍需在目标 Camera 下人工确认裁剪表现。
 - `unitScaleMeters` 应用于位置、position morph delta、Camera 裁剪面和 Light range，不应用于 normal delta。
 - Skin、Bone、动画目标和 Morph 动画以稳定 node id / target index 关联，不依赖名称唯一。
 - Three.js absolute / relative Morph Target 在导出时统一规范为 delta；Unity 不猜测源语义。
@@ -225,9 +243,10 @@ node .\dist\cli.js build-web-unity `
 | `npm run example:animated` | `animated-skinned-mesh.threeunity` | Animated Skinned Mesh | Bone、Skinning、Bind Pose 与循环 AnimationClip |
 | `npm run example:morph` | `morph-target-animation.threeunity` | Morph Target Animation | `Bulge` / `Twist` BlendShape 与 morph-weight 动画 |
 | `npm run example:material` | `material-uv-animation.threeunity` | Material UV Animation | 共享材质、颜色/发光/透明/粗糙度与 base-map offset/repeat 动画 |
+| `npm run example:primitives` | `non-mesh-primitives.threeunity` | Line Points Sprite | 连续/独立/闭合线、分组彩色点云、billboard Sprite 与 Transform/材质动画 |
 | `npm run example:components` | `component-binding-door.threeunity` | Component Binding Door | descriptor 显式绑定项目自有 `Door` MonoBehaviour |
 
-五个 Sample 都随 UPM 包提供，可从 Package Manager 的 Samples 页面直接导入。动画 Sample 拖入 Scene 后进入 Play 即可运行，不需要额外 Animator Controller。
+六个 Sample 都随 UPM 包提供，可从 Package Manager 的 Samples 页面直接导入。动画 Sample 拖入 Scene 后进入 Play 即可运行，不需要额外 Animator Controller。
 
 ## Web Bridge 运行时
 
@@ -278,7 +297,7 @@ ThreeUnityComponentBindings.Register<DoorData, Door>(
 
 | 快照 | 证据 |
 |---|---|
-| 2026-08-31 / format v4 working tree | `npm run build` PASS；Node 66/66；.NET Host 26/26；Unity EditMode 88/88；Material UV Animation 示例生成与 CLI validate PASS；Game View 人工观察未运行 |
+| 2026-08-31 / format v5 working tree | `npm run build` PASS；Node 67/67；.NET Host 26/26；Unity EditMode 89/89；Line Points Sprite 示例生成与两份资产 CLI validate PASS；Game View 人工观察未运行 |
 | 2026-08-31 / `6e9659b` | `npm run build` PASS；Node 65/65；.NET Host 26/26；Unity EditMode 87/87；Morph 示例与 CLI validate PASS |
 | 2026-08-30 local conversion snapshot | Voxel Frontier、LittleCubes、Warptracker 三个本地转换资产通过当时的 CLI validate、Unity 批处理导入和 `StandaloneWindows64` Player 构建；转换产物现为忽略文件 |
 | 2026-08-30 physical lifecycle | 两个 logic profile 的实体 Player 故障注入均到达新 session ready 与后续 logic tick；`shop-flight-v1` 记录最大 Host 并发 1，LittleCubes 记录 `OrphanHost=False` |
@@ -303,6 +322,8 @@ Three Unity Bridge 是场景、运行时与宿主桥，不是 JavaScript → C# 
 - 资产路径不会自动迁移 DOM/CSS、任意 JavaScript、音频、存档、WebXR 或自定义 GLSL。
 - Web Bridge 当前仅支持 Windows，并依赖 WebView2 Evergreen Runtime。
 - Morph tangent 与 progressive multi-frame BlendShape 仍未支持。
+- LineDash、fat line、line cap/join 与 `Line2` 系列尚未支持；Line 始终使用 1 像素 topology。
+- Points 的逐点 size/rotation、Line/Points morph target，以及 Sprite atlas、sheet animation、nine-slice 与 collider 尚未支持。
 - 材质动画只覆盖 base color/opacity、emissive、metalness、roughness 和 base-map offset/repeat；自定义 Shader/uniform、纹理替换、非 base-map UV、rotation、center 与自定义 UV matrix 不在当前范围。
 - Humanoid Avatar、重定向、IK、root motion、Animator Controller 与 Blend Tree 不在当前范围。
 - HDRP 专用映射、粒子与后处理尚未覆盖。
@@ -318,7 +339,7 @@ Three Unity Bridge 是场景、运行时与宿主桥，不是 JavaScript → C# 
 | `unity-package/` | UPM Runtime、Editor importer、Shaders、Samples 与 EditMode tests |
 | `webview-host/` | .NET 8 Windows WebView2 Host |
 | `webview-host-tests/` | Host 生命周期与恢复测试 |
-| `examples/` | 静态、骨骼动画、Morph、组件绑定与 logic adapter 示例 |
+| `examples/` | 静态、骨骼动画、Morph、材质动画、Line/Points/Sprite、组件绑定与 logic adapter 示例 |
 | `tests/` | Node 合同、导出器与协议测试 |
 | `benchmarks/` | 输入与碰撞 transport 的可复现基准 |
 | `conversion-tools/` | 开源游戏 capture 与实体 Player 故障工具 |

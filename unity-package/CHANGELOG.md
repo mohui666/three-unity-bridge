@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added `.threeunity` format v5 native `Line`, `LineSegments`, `LineLoop`, `Points`, and `Sprite` records with renderer-slot-aware primitive materials.
+- The importer now creates `MeshTopology.Lines`, camera-facing point quads, and center-aware sprite quads with packaged unlit billboard shaders.
+- Added a deterministic Line Points Sprite sample with indexed material groups, vertex colors, an asymmetric embedded texture, and looping transform/material animation.
 - Added `.threeunity` format v4 texture wrap modes, base-map scale/offset, and renderer-slot-aware material animation bindings.
 - `ThreeUnityAnimationPlayer` now samples material color, emission, metallic/roughness, opacity, and base-map UV tracks through `MaterialPropertyBlock` while retaining the legacy `Animation` clock.
 - Added deterministic material animation sampling/reset APIs and a self-contained Material UV Animation sample.

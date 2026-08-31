@@ -137,7 +137,7 @@ After installing the package in a Unity test project, run EditMode tests:
 
 `ThreeUnityLogicBridgeSessionTests.BurstFlushStopsAtBudgetAndPreservesRemainingOrder` queues 512 reliable messages. The first invocation accepts exactly 256 and retains 256; a second invocation continues at message 256 with no gap or reordering.
 
-The streamlined current gates pass 66/66 root TypeScript tests, 26/26 WebView Host .NET tests, and 88/88 Unity EditMode tests. The 14/14 LittleCubes and 36/36 name-to-shop adapter counts are a 2026-08-30 conversion snapshot, not part of the default source gate.
+The streamlined current gates pass 67/67 root TypeScript tests, 26/26 WebView Host .NET tests, and 89/89 Unity EditMode tests, including the format-v5 non-mesh primitive exporter/importer smoke. The 14/14 LittleCubes and 36/36 name-to-shop adapter counts are a 2026-08-30 conversion snapshot, not part of the default source gate.
 
 Run gates by ownership: TypeScript changes use `npm run build` plus `npm test`; Host changes add the .NET project; UPM Runtime/Editor/importer changes add Unity EditMode XML; Web Bridge lifecycle changes run only the affected reconnect mode; performance claims run the two transport benchmarks. Legacy conversion capture and Player fault injection remain explicit acceptance work, not an automatic full-suite dependency.
 

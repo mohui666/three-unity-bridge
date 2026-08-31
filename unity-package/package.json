@@ -38,6 +38,11 @@
       "displayName": "Material UV Animation",
       "description": "Plays looping base color, emission, opacity, roughness, and base-map UV animation through MaterialPropertyBlock bindings.",
       "path": "Samples~/Material UV Animation"
+    },
+    {
+      "displayName": "Line Points Sprite",
+      "description": "Imports continuous and segmented lines, a closed loop, a grouped vertex-colored point cloud, and camera-facing sprites with looping transform and material animation.",
+      "path": "Samples~/Line Points Sprite"
     }
   ]
 }

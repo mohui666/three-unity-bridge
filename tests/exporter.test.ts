@@ -9,7 +9,13 @@ import {
   DataTexture,
   DirectionalLight,
   Float32BufferAttribute,
+  InterleavedBuffer,
+  InterleavedBufferAttribute,
   InstancedMesh,
+  Line,
+  LineBasicMaterial,
+  LineLoop,
+  LineSegments,
   Matrix4,
   Mesh,
   MeshLambertMaterial,
@@ -17,6 +23,8 @@ import {
   MirroredRepeatWrapping,
   NumberKeyframeTrack,
   PerspectiveCamera,
+  Points,
+  PointsMaterial,
   Quaternion,
   QuaternionKeyframeTrack,
   RepeatWrapping,
@@ -25,6 +33,8 @@ import {
   Skeleton,
   SkinnedMesh,
   SRGBColorSpace,
+  Sprite,
+  SpriteMaterial,
   Uint16BufferAttribute,
   UnsignedByteType,
   Vector3,
@@ -113,6 +123,220 @@ test("preserves Three.js vertex-color material intent", async () => {
   assert.equal(document.materials[0].vertexColors, true);
 });
 
+test("exports Line, LineSegments, LineLoop, Points, and Sprite as format v5 primitives without mutating Three.js state", async () => {
+  const scene = new Scene();
+
+  const continuousData = new InterleavedBuffer(new Float32Array([
+    0, 0, 0, 10,
+    1, 0, 0, 11,
+    1, 1, 0, 12,
+    0, 1, 0, 13,
+  ]), 4);
+  const continuousGeometry = new BufferGeometry();
+  continuousGeometry.setAttribute("position", new InterleavedBufferAttribute(continuousData, 3, 0));
+  continuousGeometry.setIndex([2, 0, 3]);
+  const continuous = new Line(continuousGeometry, new LineBasicMaterial({ color: 0xff8844 }));
+  continuous.name = "Indexed Continuous Line";
+
+  const segmentsGeometry = new BufferGeometry();
+  segmentsGeometry.setAttribute("position", new Float32BufferAttribute([
+    -2, 0, 0,
+    -1, 1, 0,
+    0, 0, 0,
+    1, 1, 0,
+  ], 3));
+  const segments = new LineSegments(segmentsGeometry, new LineBasicMaterial({ color: 0x44aaff }));
+  segments.name = "Non Indexed Segments";
+
+  const loopGeometry = new BufferGeometry();
+  loopGeometry.setAttribute("position", new Float32BufferAttribute([
+    -1, 0, 0,
+    0, 1, 0,
+    1, 0, 0,
+    2, 0, 0,
+    3, 1, 0,
+    4, 0, 0,
+  ], 3));
+  loopGeometry.setIndex([0, 1, 2, 3, 4, 5]);
+  loopGeometry.addGroup(0, 3, 0);
+  loopGeometry.addGroup(3, 3, 1);
+  const loop = new LineLoop(loopGeometry, [
+    new LineBasicMaterial({ color: 0x33ff66 }),
+    new LineBasicMaterial({ color: 0xff33aa }),
+  ]);
+  loop.name = "Grouped Loops";
+
+  const pointsGeometry = new BufferGeometry();
+  pointsGeometry.setAttribute("position", new Float32BufferAttribute([
+    -1, -1, 0,
+    0, -1, 0,
+    1, -1, 0,
+    2, -1, 0,
+  ], 3));
+  pointsGeometry.setAttribute("color", new Float32BufferAttribute([
+    1, 0, 0,
+    0, 1, 0,
+    0, 0, 1,
+    1, 1, 0,
+  ], 3));
+  pointsGeometry.setIndex([3, 1, 2]);
+  pointsGeometry.addGroup(0, 1, 0);
+  pointsGeometry.addGroup(1, 2, 1);
+  const animatedPointsMaterial = new PointsMaterial({ color: 0xffffff, size: 12, sizeAttenuation: false, vertexColors: true });
+  const points = new Points(pointsGeometry, [animatedPointsMaterial, new PointsMaterial({ color: 0x66ccff, size: 6 })]);
+  points.name = "Colored Indexed Points";
+
+  const spritePixels = new Uint8Array([255, 128, 0, 255]);
+  const spriteTexture = new DataTexture(spritePixels, 1, 1, RGBAFormat, UnsignedByteType);
+  spriteTexture.name = "Sprite Pixel";
+  spriteTexture.repeat.set(0.75, 0.5);
+  spriteTexture.offset.set(0.125, 0.25);
+  const spriteMaterial = new SpriteMaterial({ map: spriteTexture, color: 0xffffff, rotation: Math.PI / 6, transparent: true });
+  spriteMaterial.sizeAttenuation = false;
+  const sprite = new Sprite(spriteMaterial);
+  sprite.name = "Textured Sprite";
+  sprite.center.set(0.25, 0.75);
+  sprite.position.set(3, 2, 1);
+  sprite.scale.set(-2, 3, 1);
+
+  const meshGeometry = new BufferGeometry();
+  meshGeometry.setAttribute("position", new Float32BufferAttribute([
+    0, 0, 0,
+    1, 0, 0,
+    0, 1, 0,
+  ], 3));
+  meshGeometry.setIndex([0, 1, 2]);
+  meshGeometry.morphTargetsRelative = true;
+  const lift = new Float32BufferAttribute([
+    0, 0, 0.25,
+    0, 0, 0.25,
+    0, 0, 0.25,
+  ], 3);
+  lift.name = "Lift";
+  meshGeometry.morphAttributes.position = [lift];
+  const meshMaterial = new MeshStandardMaterial({ color: 0x335577 });
+  const legacyMesh = new Mesh(meshGeometry, meshMaterial);
+  legacyMesh.name = "Coexisting Morph Mesh";
+  legacyMesh.morphTargetDictionary = { Lift: 0 };
+  legacyMesh.morphTargetInfluences = [0.2];
+
+  scene.add(continuous, segments, loop, points, sprite, legacyMesh);
+  scene.animations.push(new AnimationClip("Primitive And Mesh Animation", 1, [
+    new VectorKeyframeTrack(`${continuous.uuid}.position`, [0, 1], [0, 0, 0, 1, 0, 0]),
+    new ColorKeyframeTrack(`${points.uuid}.material[0].color`, [0, 1], [1, 1, 1, 1, 0.25, 0.1]),
+    new VectorKeyframeTrack(`${sprite.uuid}.map.offset`, [0, 1], [0.125, 0.25, 0.5, 0.75]),
+    new VectorKeyframeTrack(`${legacyMesh.uuid}.morphTargetInfluences`, [0, 1], [0.2, 0.8]),
+    new ColorKeyframeTrack(`${legacyMesh.uuid}.material.color`, [0, 1], [...meshMaterial.color.toArray(), 0.8, 0.2, 0.1]),
+  ]));
+
+  const original = {
+    continuousData: Array.from(continuousData.array),
+    continuousIndex: Array.from(continuousGeometry.index!.array),
+    continuousPosition: continuous.position.toArray(),
+    loopGroups: structuredClone(loopGeometry.groups),
+    pointsPositions: Array.from(pointsGeometry.getAttribute("position").array),
+    pointsColor: animatedPointsMaterial.color.toArray(),
+    spriteCenter: sprite.center.toArray(),
+    spriteRotation: spriteMaterial.rotation,
+    spriteOffset: spriteTexture.offset.toArray(),
+    spriteRepeat: spriteTexture.repeat.toArray(),
+    spritePixels: [...spritePixels],
+    meshColor: meshMaterial.color.toArray(),
+    morphWeights: [...legacyMesh.morphTargetInfluences],
+  };
+
+  const document = await exportThreeUnity(scene, { animationSampleRate: 2 });
+  assert.deepEqual(validateDocument(document), { valid: true, errors: [] });
+  assert.equal(document.version, 5);
+  assert.equal(document.primitives.length, 5);
+
+  const primitiveFor = (object: Line | LineSegments | LineLoop | Points | Sprite) => {
+    const node = document.nodes.find((candidate) => candidate.name === object.name);
+    assert.ok(node);
+    assert.equal(node.meshId, "");
+    assert.ok(node.primitiveId);
+    const primitive = document.primitives.find((candidate) => candidate.id === node.primitiveId);
+    assert.ok(primitive);
+    return { node, primitive };
+  };
+
+  const continuousExport = primitiveFor(continuous);
+  assert.equal(continuousExport.primitive.type, "line");
+  assert.deepEqual(continuousExport.primitive.positions, [0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0]);
+  assert.deepEqual(continuousExport.primitive.indices, [2, 0, 0, 3]);
+  assert.deepEqual(continuousExport.primitive.groups, [{ start: 0, count: 4, materialIndex: 0 }]);
+
+  const segmentsExport = primitiveFor(segments);
+  assert.equal(segmentsExport.primitive.type, "line-segments");
+  assert.deepEqual(segmentsExport.primitive.indices, [0, 1, 2, 3]);
+
+  const loopExport = primitiveFor(loop);
+  assert.equal(loopExport.primitive.type, "line-loop");
+  assert.deepEqual(loopExport.primitive.indices, [0, 1, 1, 2, 2, 0, 3, 4, 4, 5, 5, 3]);
+  assert.deepEqual(loopExport.primitive.groups, [
+    { start: 0, count: 6, materialIndex: 0 },
+    { start: 6, count: 6, materialIndex: 1 },
+  ]);
+
+  const pointsExport = primitiveFor(points);
+  assert.equal(pointsExport.primitive.type, "points");
+  assert.deepEqual(pointsExport.primitive.indices, [3, 1, 2]);
+  assert.deepEqual(pointsExport.primitive.groups, [
+    { start: 0, count: 1, materialIndex: 0 },
+    { start: 1, count: 2, materialIndex: 1 },
+  ]);
+  assert.deepEqual(pointsExport.primitive.colors, [
+    1, 0, 0, 1,
+    0, 1, 0, 1,
+    0, 0, 1, 1,
+    1, 1, 0, 1,
+  ]);
+  const exportedPointsMaterial = document.materials.find((material) => material.id === pointsExport.primitive.materialIds[0]);
+  assert.ok(exportedPointsMaterial);
+  assert.equal(exportedPointsMaterial.renderMode, "points");
+  assert.equal(exportedPointsMaterial.pointSize, 12);
+  assert.equal(exportedPointsMaterial.sizeAttenuation, false);
+
+  const spriteExport = primitiveFor(sprite);
+  assert.equal(spriteExport.primitive.type, "sprite");
+  assert.deepEqual(spriteExport.primitive.spriteCenter, [0.25, 0.75]);
+  assert.deepEqual(spriteExport.primitive.positions, []);
+  assert.deepEqual(spriteExport.primitive.indices, []);
+  const exportedSpriteMaterial = document.materials.find((material) => material.id === spriteExport.primitive.materialIds[0]);
+  assert.ok(exportedSpriteMaterial);
+  assert.equal(exportedSpriteMaterial.renderMode, "sprite");
+  assert.equal(exportedSpriteMaterial.spriteRotation, Math.PI / 6);
+  assert.equal(exportedSpriteMaterial.sizeAttenuation, false);
+  const exportedSpriteTexture = document.textures.find((texture) => texture.id === exportedSpriteMaterial.baseColorTextureId);
+  assert.ok(exportedSpriteTexture);
+  assert.equal(exportedSpriteTexture.data, "/4AA/w==");
+
+  const meshNode = document.nodes.find((node) => node.name === legacyMesh.name);
+  assert.ok(meshNode?.meshId);
+  assert.equal(meshNode.primitiveId, "");
+  assert.equal(document.meshes.find((mesh) => mesh.id === meshNode.meshId)?.morphTargets.length, 1);
+  const tracks = document.animations[0].tracks;
+  assert.ok(tracks.some((track) => track.targetNodeId === continuousExport.node.id && track.property === "position"));
+  assert.ok(tracks.some((track) => track.targetNodeId === pointsExport.node.id && track.property === "materialBaseColor" && track.materialIndex === 0));
+  assert.ok(tracks.some((track) => track.targetNodeId === spriteExport.node.id && track.property === "materialBaseMapST" && track.materialIndex === 0));
+  assert.ok(tracks.some((track) => track.targetNodeId === meshNode.id && track.property === "morphWeight"));
+  assert.ok(tracks.some((track) => track.targetNodeId === meshNode.id && track.property === "materialBaseColor"));
+
+  assert.deepEqual(Array.from(continuousData.array), original.continuousData);
+  assert.deepEqual(Array.from(continuousGeometry.index!.array), original.continuousIndex);
+  assert.deepEqual(continuous.position.toArray(), original.continuousPosition);
+  assert.deepEqual(loopGeometry.groups, original.loopGroups);
+  assert.deepEqual(Array.from(pointsGeometry.getAttribute("position").array), original.pointsPositions);
+  assert.deepEqual(animatedPointsMaterial.color.toArray(), original.pointsColor);
+  assert.deepEqual(sprite.center.toArray(), original.spriteCenter);
+  assert.equal(spriteMaterial.rotation, original.spriteRotation);
+  assert.deepEqual(spriteTexture.offset.toArray(), original.spriteOffset);
+  assert.deepEqual(spriteTexture.repeat.toArray(), original.spriteRepeat);
+  assert.deepEqual([...spritePixels], original.spritePixels);
+  assert.deepEqual(meshMaterial.color.toArray(), original.meshColor);
+  assert.deepEqual(legacyMesh.morphTargetInfluences, original.morphWeights);
+});
+
 test("exports reusable playable runtime configuration", async () => {
   const scene = new Scene();
   const document = await exportThreeUnity(scene, {
@@ -131,7 +355,7 @@ test("exports reusable playable runtime configuration", async () => {
   assert.equal(document.runtime.hotbar[0].name, "Grass");
 });
 
-test("accepts pre-runtime v1, pre-morph v2, and pre-material-animation v3 documents", async () => {
+test("accepts format versions 1 through 4 without v5 primitive fields", async () => {
   const scene = new Scene();
   const texture = new DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1, RGBAFormat, UnsignedByteType);
   const mesh = new Mesh(new BoxGeometry(), new MeshStandardMaterial({ map: texture }));
@@ -140,7 +364,19 @@ test("accepts pre-runtime v1, pre-morph v2, and pre-material-animation v3 docume
     new VectorKeyframeTrack(`${mesh.uuid}.position`, [0, 1], [0, 0, 0, 1, 0, 0]),
   ]));
   const currentDocument = await exportThreeUnity(scene);
-  const version3Document = structuredClone(currentDocument) as unknown as Record<string, unknown>;
+  const version4Document = structuredClone(currentDocument) as unknown as Record<string, unknown>;
+  version4Document.version = 4;
+  delete version4Document.primitives;
+  for (const node of version4Document.nodes as Array<Record<string, unknown>>) delete node.primitiveId;
+  for (const material of version4Document.materials as Array<Record<string, unknown>>) {
+    delete material.renderMode;
+    delete material.pointSize;
+    delete material.sizeAttenuation;
+    delete material.spriteRotation;
+  }
+  assert.deepEqual(validateDocument(version4Document), { valid: true, errors: [] });
+
+  const version3Document = structuredClone(version4Document) as unknown as Record<string, unknown>;
   version3Document.version = 3;
   for (const exportedTexture of version3Document.textures as Array<Record<string, unknown>>) {
     delete exportedTexture.wrapS;
@@ -158,7 +394,7 @@ test("accepts pre-runtime v1, pre-morph v2, and pre-material-animation v3 docume
   for (const mesh of version2Document.meshes as Array<Record<string, unknown>>) delete mesh.morphTargets;
   assert.deepEqual(validateDocument(version2Document), { valid: true, errors: [] });
 
-  const legacyDocument = structuredClone(currentDocument) as unknown as Record<string, unknown>;
+  const legacyDocument = structuredClone(version2Document) as unknown as Record<string, unknown>;
   legacyDocument.version = 1;
   delete legacyDocument.runtime;
   delete legacyDocument.skins;
@@ -225,7 +461,7 @@ test("exports a two-bone SkinnedMesh and baked AnimationClip with stable node re
   });
 
   assert.deepEqual(validateDocument(document), { valid: true, errors: [] });
-  assert.equal(document.version, 4);
+  assert.equal(document.version, 5);
   assert.equal(document.skins.length, 1);
   assert.equal(document.animations.length, 1);
   assert.equal(document.autoplayAnimation, true);
@@ -355,7 +591,7 @@ test("exports absolute and relative morph targets, initial weights, and baked mo
   const document = await exportThreeUnity(scene, { animationSampleRate: 4 });
 
   assert.deepEqual(validateDocument(document), { valid: true, errors: [] });
-  assert.equal(document.version, 4);
+  assert.equal(document.version, 5);
   assert.strictEqual(absoluteMesh.morphTargetInfluences, originalInfluenceReference);
   assert.deepEqual(absoluteMesh.morphTargetInfluences, originalInfluences);
   assert.deepEqual(absoluteMesh.position.toArray(), originalPosition);
@@ -498,7 +734,7 @@ test("exports v4 static UV state and shared material animation without mutating 
   const document = await exportThreeUnity(scene, { animationSampleRate: 2 });
 
   assert.deepEqual(validateDocument(document), { valid: true, errors: [] });
-  assert.equal(document.version, 4);
+  assert.equal(document.version, 5);
   assert.equal(document.textures[0].wrapS, "repeat");
   assert.equal(document.textures[0].wrapT, "mirror");
   const exportedSharedMaterial = document.materials.find((material) => material.name === sharedMaterial.name);
