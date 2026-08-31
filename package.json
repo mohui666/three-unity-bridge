@@ -13,6 +13,10 @@
     "./logic": {
       "types": "./dist/logic/index.d.ts",
       "import": "./dist/logic/index.js"
+    },
+    "./node": {
+      "types": "./dist/node.d.ts",
+      "import": "./dist/node.js"
     }
   },
   "bin": {
@@ -40,6 +44,7 @@
     "example:instances": "npm run build && node examples/generate-instanced-mesh.mjs",
     "example:primitives": "npm run build && node examples/generate-primitives.mjs",
     "example:components": "npm run build && node examples/generate-component-binding.mjs",
+    "example:textures": "npm run build && node examples/generate-texture-pipeline.mjs",
     "conversions:capture": "node conversion-tools/capture-games.mjs"
   },
   "keywords": [

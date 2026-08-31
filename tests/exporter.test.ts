@@ -1,4 +1,9 @@
 import assert from "node:assert/strict";
+import { once } from "node:events";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import {
   AnimationClip,
@@ -9,12 +14,16 @@ import {
   ColorKeyframeTrack,
   DataTexture,
   DirectionalLight,
+  FloatType,
   Float32BufferAttribute,
+  HalfFloatType,
   InterleavedBuffer,
   InterleavedBufferAttribute,
   InstancedMesh,
   Line,
   LineBasicMaterial,
+  LinearFilter,
+  LinearMipmapLinearFilter,
   LineLoop,
   LineSegments,
   Matrix4,
@@ -28,7 +37,10 @@ import {
   PointsMaterial,
   Quaternion,
   QuaternionKeyframeTrack,
+  RedFormat,
   RepeatWrapping,
+  RGFormat,
+  RGBFormat,
   RGBAFormat,
   Scene,
   Skeleton,
@@ -36,12 +48,14 @@ import {
   SRGBColorSpace,
   Sprite,
   SpriteMaterial,
+  Texture,
   Uint16BufferAttribute,
   UnsignedByteType,
   Vector3,
   VectorKeyframeTrack,
 } from "three";
 import { exportThreeUnity, validateDocument } from "../src/index.js";
+import { createNodeTextureResolver } from "../src/node.js";
 
 test("exports a scene hierarchy, geometry, material, camera and light", async () => {
   const scene = new Scene();
@@ -78,7 +92,15 @@ test("exports a scene hierarchy, geometry, material, camera and light", async ()
   assert.equal(document.meshes.length, 1);
   assert.equal(document.materials.length, 1);
   assert.equal(document.textures.length, 1);
-  assert.equal(document.textures[0].encoding, "rgba8");
+  assert.equal(document.version, 7);
+  assert.equal(document.textures[0].encoding, "raw");
+  assert.equal(document.textures[0].mimeType, "");
+  assert.equal(document.textures[0].pixelFormat, "rgba");
+  assert.equal(document.textures[0].componentType, "uint8");
+  assert.equal(document.textures[0].colorSpace, "srgb");
+  assert.equal(document.textures[0].filterMode, "point");
+  assert.equal(document.textures[0].mipmaps, false);
+  assert.equal(document.textures[0].anisotropy, 1);
   assert.equal(document.textures[0].data, "/wAA/w==");
 
   const cubeNode = document.nodes.find((node) => node.name === "Exported Cube");
@@ -88,6 +110,225 @@ test("exports a scene hierarchy, geometry, material, camera and light", async ()
   assert.equal(cubeNode.components[0].type, "Spin");
   assert.equal(cubeNode.components[0].dataJson, "{\"degreesPerSecond\":30}");
   assert.equal(cubeNode.metadataJson, "{\"gameplayTag\":\"pickup\"}");
+});
+
+test("exports one self-contained v7 pipeline for local/HTTP images and the raw DataTexture matrix", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "three-unity-textures-"));
+  const pngBytes = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+  );
+  const jpegBytes = Uint8Array.from([0xff, 0xd8, 0xff, 0xd9]);
+  await writeFile(join(directory, "local.png"), pngBytes);
+
+  const server = createServer((request, response) => {
+    if (request.url !== "/remote.jpg") {
+      response.writeHead(404).end();
+      return;
+    }
+    response.writeHead(200, { "Content-Type": "image/jpeg" });
+    response.end(jpegBytes);
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const httpUri = `http://127.0.0.1:${address.port}/remote.jpg`;
+
+  try {
+    const localTexture = new Texture();
+    localTexture.name = "Local PNG";
+    localTexture.userData.threeUnitySource = "./local.png";
+    localTexture.flipY = true;
+    localTexture.colorSpace = SRGBColorSpace;
+    localTexture.wrapS = RepeatWrapping;
+    localTexture.wrapT = MirroredRepeatWrapping;
+    localTexture.magFilter = LinearFilter;
+    localTexture.minFilter = LinearMipmapLinearFilter;
+    localTexture.generateMipmaps = true;
+    localTexture.anisotropy = 4;
+
+    const httpTexture = new Texture();
+    httpTexture.name = "HTTP JPEG";
+    httpTexture.image = { currentSrc: httpUri };
+
+    const r8Data = new Uint8Array([0x12, 0xfe]);
+    const rg8Data = new Uint8ClampedArray([0x01, 0x02, 0x80, 0xff]);
+    const rgbHalfData = new Uint16Array([0x3c00, 0x3800, 0x0000]);
+    const rgbaFloatData = new Float32Array([1, 0.5, 0.25, 1]);
+    const r8 = new DataTexture(r8Data, 2, 1, RedFormat, UnsignedByteType);
+    const rg8 = new DataTexture(rg8Data, 2, 1, RGFormat, UnsignedByteType);
+    const rgbHalf = new DataTexture(rgbHalfData, 1, 1, RGBFormat, HalfFloatType);
+    const rgbaFloat = new DataTexture(rgbaFloatData, 1, 1, RGBAFormat, FloatType);
+    r8.name = "R8";
+    rg8.name = "RG8";
+    rgbHalf.name = "RGB Half";
+    rgbaFloat.name = "RGBA Float";
+    rgbHalf.magFilter = LinearFilter;
+    rgbHalf.minFilter = LinearMipmapLinearFilter;
+    rgbHalf.generateMipmaps = true;
+    rgbHalf.anisotropy = 8;
+    rgbaFloat.magFilter = LinearFilter;
+    rgbaFloat.minFilter = LinearFilter;
+    rgbaFloat.generateMipmaps = false;
+    rgbaFloat.flipY = false;
+
+    const localMaterial = new MeshStandardMaterial({ map: localTexture });
+    localMaterial.name = "Shared Local Material";
+    const localMesh = new Mesh(new BoxGeometry(), localMaterial);
+    const localInstances = new InstancedMesh(new BoxGeometry(), localMaterial, 1);
+    localInstances.setMatrixAt(0, new Matrix4());
+    const localSpriteMaterial = new SpriteMaterial({ map: localTexture });
+    localSpriteMaterial.name = "Shared Local Sprite Material";
+    const scene = new Scene();
+    scene.add(
+      localMesh,
+      localInstances,
+      new Sprite(localSpriteMaterial),
+      new Mesh(new BoxGeometry(), new MeshStandardMaterial({ map: httpTexture })),
+      new Mesh(new BoxGeometry(), new MeshStandardMaterial({ map: r8 })),
+      new Mesh(new BoxGeometry(), new MeshStandardMaterial({ map: rg8 })),
+      new Mesh(new BoxGeometry(), new MeshStandardMaterial({ map: rgbHalf })),
+      new Mesh(new BoxGeometry(), new MeshStandardMaterial({ map: rgbaFloat })),
+    );
+
+    const sourceState = [r8, rg8, rgbHalf, rgbaFloat].map((texture) => ({
+      data: Array.from(texture.image.data),
+      format: texture.format,
+      type: texture.type,
+      flipY: texture.flipY,
+      colorSpace: texture.colorSpace,
+      generateMipmaps: texture.generateMipmaps,
+      magFilter: texture.magFilter,
+      minFilter: texture.minFilter,
+      anisotropy: texture.anisotropy,
+      unpackAlignment: texture.unpackAlignment,
+      version: texture.version,
+    }));
+    const encodedSourceState = [localTexture, httpTexture].map((texture) => ({
+      source: texture.source,
+      sourceData: texture.source.data,
+      image: texture.image,
+      explicitSource: texture.userData.threeUnitySource,
+      flipY: texture.flipY,
+      colorSpace: texture.colorSpace,
+      wrapS: texture.wrapS,
+      wrapT: texture.wrapT,
+      magFilter: texture.magFilter,
+      minFilter: texture.minFilter,
+      generateMipmaps: texture.generateMipmaps,
+      anisotropy: texture.anisotropy,
+      version: texture.version,
+    }));
+    const resolutionCounts = new Map<string, number>();
+    const nodeResolver = createNodeTextureResolver({ baseDirectory: directory });
+    const document = await exportThreeUnity(scene, {
+      textureResolver: async (request) => {
+        resolutionCounts.set(request.sourceUri, (resolutionCounts.get(request.sourceUri) ?? 0) + 1);
+        return nodeResolver(request);
+      },
+    });
+
+    assert.equal(document.version, 7);
+    assert.deepEqual(validateDocument(document), { valid: true, errors: [] });
+    assert.equal(resolutionCounts.get("./local.png"), 1);
+    assert.equal(resolutionCounts.get(httpUri), 1);
+    const json = JSON.stringify(document);
+    assert.equal(json.includes("./local.png"), false);
+    assert.equal(json.includes(httpUri), false);
+    assert.equal(json.includes(directory), false);
+
+    const localRecord = document.textures.find((texture) => texture.name === localTexture.name);
+    const httpRecord = document.textures.find((texture) => texture.name === httpTexture.name);
+    assert.ok(localRecord && httpRecord);
+    assert.equal(localRecord.encoding, "encoded-image");
+    assert.equal(localRecord.mimeType, "image/png");
+    assert.deepEqual([...Buffer.from(localRecord.data, "base64").subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    assert.equal(localRecord.colorSpace, "srgb");
+    assert.equal(localRecord.flipY, true);
+    assert.equal(localRecord.wrapS, "repeat");
+    assert.equal(localRecord.wrapT, "mirror");
+    assert.equal(localRecord.filterMode, "trilinear");
+    assert.equal(localRecord.mipmaps, true);
+    assert.equal(localRecord.anisotropy, 4);
+    assert.equal(httpRecord.mimeType, "image/jpeg");
+    assert.deepEqual([...Buffer.from(httpRecord.data, "base64")], [...jpegBytes]);
+
+    const rawByName = new Map(document.textures.filter((texture) => texture.encoding === "raw").map((texture) => [texture.name, texture]));
+    assert.deepEqual(
+      ["R8", "RG8", "RGB Half", "RGBA Float"].map((name) => {
+        const texture = rawByName.get(name);
+        assert.ok(texture);
+        return [texture.pixelFormat, texture.componentType];
+      }),
+      [["r", "uint8"], ["rg", "uint8"], ["rgb", "float16"], ["rgba", "float32"]],
+    );
+    assert.deepEqual([...Buffer.from(rawByName.get("R8")!.data, "base64")], [...r8Data]);
+    assert.deepEqual([...Buffer.from(rawByName.get("RG8")!.data, "base64")], [...rg8Data]);
+    assert.deepEqual([...Buffer.from(rawByName.get("RGB Half")!.data, "base64")], [0x00, 0x3c, 0x00, 0x38, 0x00, 0x00]);
+    const floatBytes = Buffer.from(rawByName.get("RGBA Float")!.data, "base64");
+    const floatView = new DataView(floatBytes.buffer, floatBytes.byteOffset, floatBytes.byteLength);
+    assert.deepEqual([0, 1, 2, 3].map((index) => floatView.getFloat32(index * 4, true)), [...rgbaFloatData]);
+    assert.equal(rawByName.get("RGB Half")!.filterMode, "trilinear");
+    assert.equal(rawByName.get("RGB Half")!.mipmaps, true);
+    assert.equal(rawByName.get("RGB Half")!.anisotropy, 8);
+
+    const localMaterialRecords = document.materials.filter((material) =>
+      material.name === localMaterial.name || material.name === localSpriteMaterial.name
+    );
+    assert.equal(localMaterialRecords.length, 2);
+    assert.ok(localMaterialRecords.every((material) => material.baseColorTextureId === localRecord.id));
+    const instancedNode = document.nodes.find((node) => node.instancedMeshId);
+    assert.ok(instancedNode);
+    const instancedRecord = document.instancedMeshes.find((record) => record.id === instancedNode.instancedMeshId);
+    assert.ok(instancedRecord);
+    const instancedMesh = document.meshes.find((mesh) => mesh.id === instancedRecord.meshId);
+    assert.ok(instancedMesh);
+    const instancedMaterial = document.materials.find((material) => material.id === instancedMesh.materialIds[0]);
+    assert.ok(instancedMaterial);
+    assert.equal(instancedMaterial.baseColorTextureId, localRecord.id);
+
+    for (const [index, texture] of [localTexture, httpTexture].entries()) {
+      assert.equal(texture.source, encodedSourceState[index].source);
+      assert.equal(texture.source.data, encodedSourceState[index].sourceData);
+      assert.equal(texture.image, encodedSourceState[index].image);
+      assert.equal(texture.userData.threeUnitySource, encodedSourceState[index].explicitSource);
+      assert.equal(texture.flipY, encodedSourceState[index].flipY);
+      assert.equal(texture.colorSpace, encodedSourceState[index].colorSpace);
+      assert.equal(texture.wrapS, encodedSourceState[index].wrapS);
+      assert.equal(texture.wrapT, encodedSourceState[index].wrapT);
+      assert.equal(texture.magFilter, encodedSourceState[index].magFilter);
+      assert.equal(texture.minFilter, encodedSourceState[index].minFilter);
+      assert.equal(texture.generateMipmaps, encodedSourceState[index].generateMipmaps);
+      assert.equal(texture.anisotropy, encodedSourceState[index].anisotropy);
+      assert.equal(texture.version, encodedSourceState[index].version);
+    }
+    for (const [index, texture] of [r8, rg8, rgbHalf, rgbaFloat].entries()) {
+      assert.deepEqual(Array.from(texture.image.data), sourceState[index].data);
+      assert.equal(texture.format, sourceState[index].format);
+      assert.equal(texture.type, sourceState[index].type);
+      assert.equal(texture.flipY, sourceState[index].flipY);
+      assert.equal(texture.colorSpace, sourceState[index].colorSpace);
+      assert.equal(texture.generateMipmaps, sourceState[index].generateMipmaps);
+      assert.equal(texture.magFilter, sourceState[index].magFilter);
+      assert.equal(texture.minFilter, sourceState[index].minFilter);
+      assert.equal(texture.anisotropy, sourceState[index].anisotropy);
+      assert.equal(texture.unpackAlignment, sourceState[index].unpackAlignment);
+      assert.equal(texture.version, sourceState[index].version);
+    }
+
+    const missingV7Field = structuredClone(document) as unknown as { textures: Array<Record<string, unknown>> };
+    delete missingV7Field.textures[0].filterMode;
+    assert.match(validateDocument(missingV7Field).errors.join("\n"), /filterMode must be point, bilinear, or trilinear/);
+    const wrongRawLength = structuredClone(document);
+    const wrongRaw = wrongRawLength.textures.find((texture) => texture.encoding === "raw");
+    assert.ok(wrongRaw);
+    wrongRaw.data = Buffer.from([0]).toString("base64");
+    assert.match(validateDocument(wrongRawLength).errors.join("\n"), /data byte length must be/);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("deduplicates shared geometry and material", async () => {
@@ -248,7 +489,7 @@ test("exports Line, LineSegments, LineLoop, Points, and Sprite as format v5 prim
 
   const document = await exportThreeUnity(scene, { animationSampleRate: 2 });
   assert.deepEqual(validateDocument(document), { valid: true, errors: [] });
-  assert.equal(document.version, 6);
+  assert.equal(document.version, 7);
   assert.equal(document.primitives.length, 5);
 
   const primitiveFor = (object: Line | LineSegments | LineLoop | Points | Sprite) => {
@@ -356,7 +597,7 @@ test("exports reusable playable runtime configuration", async () => {
   assert.equal(document.runtime.hotbar[0].name, "Grass");
 });
 
-test("accepts format versions 1 through 5 without later format fields", async () => {
+test("accepts format versions 1 through 6 without later format fields", async () => {
   const scene = new Scene();
   const texture = new DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1, RGBAFormat, UnsignedByteType);
   const mesh = new Mesh(new BoxGeometry(), new MeshStandardMaterial({ map: texture }));
@@ -365,7 +606,20 @@ test("accepts format versions 1 through 5 without later format fields", async ()
     new VectorKeyframeTrack(`${mesh.uuid}.position`, [0, 1], [0, 0, 0, 1, 0, 0]),
   ]));
   const currentDocument = await exportThreeUnity(scene);
-  const version5Document = structuredClone(currentDocument) as unknown as Record<string, unknown>;
+  const version6Document = structuredClone(currentDocument) as unknown as Record<string, unknown>;
+  version6Document.version = 6;
+  for (const exportedTexture of version6Document.textures as Array<Record<string, unknown>>) {
+    exportedTexture.encoding = "rgba8";
+    delete exportedTexture.mimeType;
+    delete exportedTexture.pixelFormat;
+    delete exportedTexture.componentType;
+    delete exportedTexture.filterMode;
+    delete exportedTexture.mipmaps;
+    delete exportedTexture.anisotropy;
+  }
+  assert.deepEqual(validateDocument(version6Document), { valid: true, errors: [] });
+
+  const version5Document = structuredClone(version6Document) as unknown as Record<string, unknown>;
   version5Document.version = 5;
   delete version5Document.instancedMeshes;
   for (const node of version5Document.nodes as Array<Record<string, unknown>>) delete node.instancedMeshId;
@@ -468,7 +722,7 @@ test("exports a two-bone SkinnedMesh and baked AnimationClip with stable node re
   });
 
   assert.deepEqual(validateDocument(document), { valid: true, errors: [] });
-  assert.equal(document.version, 6);
+  assert.equal(document.version, 7);
   assert.equal(document.skins.length, 1);
   assert.equal(document.animations.length, 1);
   assert.equal(document.autoplayAnimation, true);
@@ -598,7 +852,7 @@ test("exports absolute and relative morph targets, initial weights, and baked mo
   const document = await exportThreeUnity(scene, { animationSampleRate: 4 });
 
   assert.deepEqual(validateDocument(document), { valid: true, errors: [] });
-  assert.equal(document.version, 6);
+  assert.equal(document.version, 7);
   assert.strictEqual(absoluteMesh.morphTargetInfluences, originalInfluenceReference);
   assert.deepEqual(absoluteMesh.morphTargetInfluences, originalInfluences);
   assert.deepEqual(absoluteMesh.position.toArray(), originalPosition);
@@ -741,7 +995,7 @@ test("exports v4 static UV state and shared material animation without mutating 
   const document = await exportThreeUnity(scene, { animationSampleRate: 2 });
 
   assert.deepEqual(validateDocument(document), { valid: true, errors: [] });
-  assert.equal(document.version, 6);
+  assert.equal(document.version, 7);
   assert.equal(document.textures[0].wrapS, "repeat");
   assert.equal(document.textures[0].wrapT, "mirror");
   const exportedSharedMaterial = document.materials.find((material) => material.name === sharedMaterial.name);
@@ -861,7 +1115,7 @@ test("exports native GPU InstancedMesh records with full matrices and colors whi
 
   const document = await exportThreeUnity(scene, { animationSampleRate: 2 });
   assert.deepEqual(validateDocument(document), { valid: true, errors: [] });
-  assert.equal(document.version, 6);
+  assert.equal(document.version, 7);
   assert.equal(document.meshes.length, 1);
   assert.equal(document.instancedMeshes.length, 1);
   assert.equal(document.nodes.length, 2);

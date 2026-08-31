@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added `.threeunity` format v7 `encoded-image` and little-endian `raw` texture import with source color space, row orientation, wrap, filter, mipmap, and anisotropy settings.
+- Added native R/RG/RGB/RGBA uint8, half-float, and float `Texture2D` formats, including lossless RGB half/float expansion to RGBA with alpha one.
+- Added a self-contained Texture Sources and DataTexture sample plus focused importer coverage for encoded orientation, raw values, sampler state, and shared texture identity.
 - Added `.threeunity` format v6 native `InstancedMesh` records with compact local matrices, optional per-instance colors, and an explicit legacy `expanded` export mode.
 - Added `ThreeUnityInstancedRenderer`, 1023-instance `Graphics.DrawMeshInstanced` batching, submesh-aware shared materials, and import-time colored material variants without per-instance GameObjects or runtime material clones.
 - Added a deterministic 2500-instance GPU Instanced Mesh sample with varied transforms, shear, two material groups, per-instance color, and looping group animation.

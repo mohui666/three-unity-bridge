@@ -4,7 +4,8 @@ export const THREE_UNITY_SKINNED_VERSION = 2 as const;
 export const THREE_UNITY_MORPH_VERSION = 3 as const;
 export const THREE_UNITY_MATERIAL_ANIMATION_VERSION = 4 as const;
 export const THREE_UNITY_PRIMITIVE_VERSION = 5 as const;
-export const THREE_UNITY_VERSION = 6 as const;
+export const THREE_UNITY_INSTANCED_VERSION = 6 as const;
+export const THREE_UNITY_VERSION = 7 as const;
 
 export type Vec2 = [number, number];
 export type Vec3 = [number, number, number];
@@ -221,17 +222,35 @@ export interface ThreeUnityMaterial {
 
 export type ThreeUnityTextureWrap = "repeat" | "clamp" | "mirror";
 
+export type ThreeUnityTextureEncoding =
+  | "rgba8"
+  | "data-url"
+  | "encoded-image"
+  | "raw";
+
+export type ThreeUnityTextureMimeType = "" | "image/png" | "image/jpeg";
+export type ThreeUnityTexturePixelFormat = "" | "r" | "rg" | "rgb" | "rgba";
+export type ThreeUnityTextureComponentType = "" | "uint8" | "float16" | "float32";
+export type ThreeUnityTextureColorSpace = "none" | "linear" | "srgb";
+export type ThreeUnityTextureFilterMode = "point" | "bilinear" | "trilinear";
+
 export interface ThreeUnityTexture {
   id: string;
   name: string;
   width: number;
   height: number;
-  encoding: "rgba8" | "data-url";
+  encoding: ThreeUnityTextureEncoding;
   data: string;
+  mimeType: ThreeUnityTextureMimeType;
+  pixelFormat: ThreeUnityTexturePixelFormat;
+  componentType: ThreeUnityTextureComponentType;
   flipY: boolean;
-  colorSpace: string;
+  colorSpace: ThreeUnityTextureColorSpace;
   wrapS: ThreeUnityTextureWrap;
   wrapT: ThreeUnityTextureWrap;
+  filterMode: ThreeUnityTextureFilterMode;
+  mipmaps: boolean;
+  anisotropy: number;
 }
 
 export interface ValidationResult {
@@ -254,22 +273,28 @@ export function validateDocument(value: unknown): ValidationResult {
     && version !== THREE_UNITY_MORPH_VERSION
     && version !== THREE_UNITY_MATERIAL_ANIMATION_VERSION
     && version !== THREE_UNITY_PRIMITIVE_VERSION
+    && version !== THREE_UNITY_INSTANCED_VERSION
     && version !== THREE_UNITY_VERSION
   ) {
     errors.push(
-      `version must be ${THREE_UNITY_LEGACY_VERSION}, ${THREE_UNITY_SKINNED_VERSION}, ${THREE_UNITY_MORPH_VERSION}, ${THREE_UNITY_MATERIAL_ANIMATION_VERSION}, ${THREE_UNITY_PRIMITIVE_VERSION}, or ${THREE_UNITY_VERSION}.`,
+      `version must be ${THREE_UNITY_LEGACY_VERSION}, ${THREE_UNITY_SKINNED_VERSION}, ${THREE_UNITY_MORPH_VERSION}, ${THREE_UNITY_MATERIAL_ANIMATION_VERSION}, ${THREE_UNITY_PRIMITIVE_VERSION}, ${THREE_UNITY_INSTANCED_VERSION}, or ${THREE_UNITY_VERSION}.`,
     );
   }
   if (!Array.isArray(document.nodes)) errors.push("nodes must be an array.");
   if (!Array.isArray(document.meshes)) errors.push("meshes must be an array.");
   if (
-    (version === THREE_UNITY_PRIMITIVE_VERSION || version === THREE_UNITY_VERSION)
+    (version === THREE_UNITY_PRIMITIVE_VERSION
+      || version === THREE_UNITY_INSTANCED_VERSION
+      || version === THREE_UNITY_VERSION)
     && !Array.isArray(document.primitives)
   ) {
     errors.push("primitives must be an array in version 5 or later.");
   }
-  if (version === THREE_UNITY_VERSION && !Array.isArray(document.instancedMeshes)) {
-    errors.push("instancedMeshes must be an array in version 6.");
+  if (
+    (version === THREE_UNITY_INSTANCED_VERSION || version === THREE_UNITY_VERSION)
+    && !Array.isArray(document.instancedMeshes)
+  ) {
+    errors.push("instancedMeshes must be an array in version 6 or later.");
   }
   if (!Array.isArray(document.materials)) errors.push("materials must be an array.");
   if (!Array.isArray(document.textures)) errors.push("textures must be an array.");
@@ -285,16 +310,22 @@ export function validateDocument(value: unknown): ValidationResult {
     || version === THREE_UNITY_MORPH_VERSION
     || version === THREE_UNITY_MATERIAL_ANIMATION_VERSION
     || version === THREE_UNITY_PRIMITIVE_VERSION
+    || version === THREE_UNITY_INSTANCED_VERSION
     || version === THREE_UNITY_VERSION;
   const v3OrLater = version === THREE_UNITY_MORPH_VERSION
     || version === THREE_UNITY_MATERIAL_ANIMATION_VERSION
     || version === THREE_UNITY_PRIMITIVE_VERSION
+    || version === THREE_UNITY_INSTANCED_VERSION
     || version === THREE_UNITY_VERSION;
   const v4OrLater = version === THREE_UNITY_MATERIAL_ANIMATION_VERSION
     || version === THREE_UNITY_PRIMITIVE_VERSION
+    || version === THREE_UNITY_INSTANCED_VERSION
     || version === THREE_UNITY_VERSION;
-  const v5OrLater = version === THREE_UNITY_PRIMITIVE_VERSION || version === THREE_UNITY_VERSION;
-  const v6 = version === THREE_UNITY_VERSION;
+  const v5OrLater = version === THREE_UNITY_PRIMITIVE_VERSION
+    || version === THREE_UNITY_INSTANCED_VERSION
+    || version === THREE_UNITY_VERSION;
+  const v6OrLater = version === THREE_UNITY_INSTANCED_VERSION || version === THREE_UNITY_VERSION;
+  const v7 = version === THREE_UNITY_VERSION;
   const documentV2 = document as Partial<ThreeUnityDocument>;
   if (v2OrLater) {
     if (!Array.isArray(documentV2.skins)) errors.push("skins must be an array in version 2 or later.");
@@ -317,11 +348,11 @@ export function validateDocument(value: unknown): ValidationResult {
       if (v2OrLater && typeof node.skinId !== "string") errors.push(`nodes[${index}].skinId must be a string in version 2 or later.`);
       if (v3OrLater && !isFiniteNumberArray(node.morphWeights)) errors.push(`nodes[${index}].morphWeights must contain finite values in version 3 or later.`);
       if (v5OrLater && typeof node.primitiveId !== "string") errors.push(`nodes[${index}].primitiveId must be a string in version 5 or later.`);
-      if (v6 && typeof node.instancedMeshId !== "string") errors.push(`nodes[${index}].instancedMeshId must be a string in version 6.`);
+      if (v6OrLater && typeof node.instancedMeshId !== "string") errors.push(`nodes[${index}].instancedMeshId must be a string in version 6 or later.`);
       if (version === THREE_UNITY_PRIMITIVE_VERSION && node.meshId && node.primitiveId) {
         errors.push(`nodes[${index}] cannot reference both meshId and primitiveId.`);
       }
-      if (v6) {
+      if (v6OrLater) {
         const renderableReferenceCount = [node.meshId, node.primitiveId, node.instancedMeshId].filter(Boolean).length;
         if (renderableReferenceCount > 1) {
           errors.push(`nodes[${index}] may reference only one of meshId, primitiveId, or instancedMeshId.`);
@@ -354,11 +385,14 @@ export function validateDocument(value: unknown): ValidationResult {
   if (v4OrLater && Array.isArray(document.textures)) {
     for (const [index, texture] of document.textures.entries()) {
       const path = `textures[${index}]`;
-      if (!texture.id) errors.push(`${path}.id is required.`);
-      if (textureIds.has(texture.id)) errors.push(`Duplicate texture id '${texture.id}'.`);
-      textureIds.add(texture.id);
+      if (typeof texture.id !== "string" || texture.id.length === 0) errors.push(`${path}.id is required.`);
+      else {
+        if (textureIds.has(texture.id)) errors.push(`Duplicate texture id '${texture.id}'.`);
+        textureIds.add(texture.id);
+      }
       if (!isTextureWrap(texture.wrapS)) errors.push(`${path}.wrapS must be repeat, clamp, or mirror.`);
       if (!isTextureWrap(texture.wrapT)) errors.push(`${path}.wrapT must be repeat, clamp, or mirror.`);
+      if (v7) validateV7Texture(texture, path, errors);
     }
   }
   if (v4OrLater && Array.isArray(document.materials)) {
@@ -393,7 +427,7 @@ export function validateDocument(value: unknown): ValidationResult {
   }
 
   const instancedMeshesById = new Map<string, ThreeUnityInstancedMesh>();
-  if (v6 && Array.isArray(document.instancedMeshes)) {
+  if (v6OrLater && Array.isArray(document.instancedMeshes)) {
     for (const [index, instancedMesh] of document.instancedMeshes.entries()) {
       const path = `instancedMeshes[${index}]`;
       if (!instancedMesh.id) errors.push(`${path}.id is required.`);
@@ -408,7 +442,7 @@ export function validateDocument(value: unknown): ValidationResult {
     if (v5OrLater && node.primitiveId && !primitivesById.has(node.primitiveId)) {
       errors.push(`Node '${node.id}' references missing primitive '${node.primitiveId}'.`);
     }
-    if (v6 && node.instancedMeshId && !instancedMeshesById.has(node.instancedMeshId)) {
+    if (v6OrLater && node.instancedMeshId && !instancedMeshesById.has(node.instancedMeshId)) {
       errors.push(`Node '${node.id}' references missing instanced mesh '${node.instancedMeshId}'.`);
     }
     if (v3OrLater && Array.isArray(node.morphWeights)) {
@@ -811,6 +845,117 @@ function isPrimitiveType(value: unknown): value is ThreeUnityPrimitiveType {
 
 function isMaterialRenderMode(value: unknown): value is ThreeUnityMaterialRenderMode {
   return value === "surface" || value === "line" || value === "points" || value === "sprite";
+}
+
+function validateV7Texture(texture: ThreeUnityTexture, path: string, errors: string[]): void {
+  if (typeof texture.name !== "string") errors.push(`${path}.name must be a string.`);
+  if (texture.encoding !== "encoded-image" && texture.encoding !== "raw") {
+    errors.push(`${path}.encoding must be encoded-image or raw in version 7.`);
+  }
+  if (typeof texture.data !== "string" || texture.data.length === 0) errors.push(`${path}.data must be a non-empty base64 string.`);
+  if (typeof texture.flipY !== "boolean") errors.push(`${path}.flipY must be a boolean.`);
+  if (!isTextureColorSpace(texture.colorSpace)) errors.push(`${path}.colorSpace must be none, linear, or srgb.`);
+  if (!isTextureFilterMode(texture.filterMode)) errors.push(`${path}.filterMode must be point, bilinear, or trilinear.`);
+  if (typeof texture.mipmaps !== "boolean") errors.push(`${path}.mipmaps must be a boolean.`);
+  if (texture.filterMode === "trilinear" && texture.mipmaps === false) {
+    errors.push(`${path}.filterMode trilinear requires mipmaps.`);
+  }
+  if (!Number.isFinite(texture.anisotropy) || !Number.isInteger(texture.anisotropy) || texture.anisotropy < 1) {
+    errors.push(`${path}.anisotropy must be a finite integer greater than or equal to 1.`);
+  }
+
+  if (texture.encoding === "encoded-image") validateEncodedImageTexture(texture, path, errors);
+  else if (texture.encoding === "raw") validateRawTexture(texture, path, errors);
+}
+
+function validateEncodedImageTexture(texture: ThreeUnityTexture, path: string, errors: string[]): void {
+  if (!isEncodedImageMimeType(texture.mimeType)) errors.push(`${path}.mimeType must be image/png or image/jpeg for encoded-image.`);
+  if (texture.pixelFormat !== "") errors.push(`${path}.pixelFormat must be empty for encoded-image.`);
+  if (texture.componentType !== "") errors.push(`${path}.componentType must be empty for encoded-image.`);
+  if (!Number.isInteger(texture.width) || texture.width < 0) errors.push(`${path}.width must be a non-negative integer for encoded-image.`);
+  if (!Number.isInteger(texture.height) || texture.height < 0) errors.push(`${path}.height must be a non-negative integer for encoded-image.`);
+  const bytes = decodeBase64(texture.data);
+  if (!bytes) {
+    if (typeof texture.data === "string" && texture.data.length > 0) errors.push(`${path}.data must be valid base64.`);
+    return;
+  }
+  if (bytes.length === 0) {
+    errors.push(`${path}.data must decode to a non-empty image payload.`);
+    return;
+  }
+  if (isEncodedImageMimeType(texture.mimeType) && !matchesImageMagic(bytes, texture.mimeType)) {
+    errors.push(`${path}.data magic bytes must match ${texture.mimeType}.`);
+  }
+}
+
+function validateRawTexture(texture: ThreeUnityTexture, path: string, errors: string[]): void {
+  if (texture.mimeType !== "") errors.push(`${path}.mimeType must be empty for raw.`);
+  if (!isTexturePixelFormat(texture.pixelFormat)) errors.push(`${path}.pixelFormat must be r, rg, rgb, or rgba for raw.`);
+  if (!isTextureComponentType(texture.componentType)) errors.push(`${path}.componentType must be uint8, float16, or float32 for raw.`);
+  if (!Number.isInteger(texture.width) || texture.width <= 0) errors.push(`${path}.width must be a positive integer for raw.`);
+  if (!Number.isInteger(texture.height) || texture.height <= 0) errors.push(`${path}.height must be a positive integer for raw.`);
+  const bytes = decodeBase64(texture.data);
+  if (!bytes) {
+    if (typeof texture.data === "string" && texture.data.length > 0) errors.push(`${path}.data must be valid base64.`);
+    return;
+  }
+  if (
+    Number.isInteger(texture.width)
+    && texture.width > 0
+    && Number.isInteger(texture.height)
+    && texture.height > 0
+    && isTexturePixelFormat(texture.pixelFormat)
+    && isTextureComponentType(texture.componentType)
+  ) {
+    const channels = texture.pixelFormat === "r" ? 1 : texture.pixelFormat === "rg" ? 2 : texture.pixelFormat === "rgb" ? 3 : 4;
+    const bytesPerComponent = texture.componentType === "uint8" ? 1 : texture.componentType === "float16" ? 2 : 4;
+    const expectedByteCount = texture.width * texture.height * channels * bytesPerComponent;
+    if (!Number.isSafeInteger(expectedByteCount)) errors.push(`${path} dimensions and pixel layout exceed the supported byte count.`);
+    else if (bytes.length !== expectedByteCount) {
+      errors.push(`${path}.data byte length must be ${expectedByteCount}, received ${bytes.length}.`);
+    }
+  }
+}
+
+function decodeBase64(value: unknown): Uint8Array | undefined {
+  if (typeof value !== "string" || value.length === 0 || value.length % 4 !== 0) return undefined;
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) return undefined;
+  try {
+    const binary = atob(value);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return bytes;
+  } catch {
+    return undefined;
+  }
+}
+
+function matchesImageMagic(bytes: Uint8Array, mimeType: ThreeUnityTextureMimeType): boolean {
+  if (mimeType === "image/png") {
+    const png = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    return bytes.length >= png.length && png.every((value, index) => bytes[index] === value);
+  }
+  return mimeType === "image/jpeg" && bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+}
+
+function isEncodedImageMimeType(value: unknown): value is "image/png" | "image/jpeg" {
+  return value === "image/png" || value === "image/jpeg";
+}
+
+function isTexturePixelFormat(value: unknown): value is Exclude<ThreeUnityTexturePixelFormat, ""> {
+  return value === "r" || value === "rg" || value === "rgb" || value === "rgba";
+}
+
+function isTextureComponentType(value: unknown): value is Exclude<ThreeUnityTextureComponentType, ""> {
+  return value === "uint8" || value === "float16" || value === "float32";
+}
+
+function isTextureColorSpace(value: unknown): value is ThreeUnityTextureColorSpace {
+  return value === "none" || value === "linear" || value === "srgb";
+}
+
+function isTextureFilterMode(value: unknown): value is ThreeUnityTextureFilterMode {
+  return value === "point" || value === "bilinear" || value === "trilinear";
 }
 
 function isTextureWrap(value: unknown): value is ThreeUnityTextureWrap {

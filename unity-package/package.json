@@ -48,6 +48,11 @@
       "displayName": "GPU Instanced Mesh",
       "description": "Imports 2500 colored instances into one GameObject and renders them in three native GPU-instanced matrix batches.",
       "path": "Samples~/GPU Instanced Mesh"
+    },
+    {
+      "displayName": "Texture Sources and DataTexture",
+      "description": "Imports self-contained local and HTTP PNG/JPEG sources plus uint8, half-float, and float DataTextures with source sampler and color-space settings.",
+      "path": "Samples~/Texture Sources and DataTexture"
     }
   ]
 }

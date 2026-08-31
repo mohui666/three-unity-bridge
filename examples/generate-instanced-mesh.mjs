@@ -108,7 +108,7 @@ if (!validation.valid) throw new Error(`Generated GPU instancing example is inva
 
 const node = document.nodes.find((candidate) => candidate.name === instances.name);
 const record = document.instancedMeshes[0];
-assert.equal(document.version, 6);
+assert.equal(document.version, 7);
 assert.ok(node);
 assert.equal(node.instancedMeshId, record.id);
 assert.equal(record.name, "GPU Instanced Field Instances");

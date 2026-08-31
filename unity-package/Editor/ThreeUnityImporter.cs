@@ -8,7 +8,7 @@ using UnityEngine.Rendering;
 
 namespace ThreeUnity.Bridge.Editor
 {
-    [ScriptedImporter(10, "threeunity")]
+    [ScriptedImporter(11, "threeunity")]
     public sealed class ThreeUnityImporter : ScriptedImporter
     {
         [SerializeField] private bool importCameras = true;
@@ -28,9 +28,9 @@ namespace ThreeUnity.Bridge.Editor
                 return;
             }
 
-            if (document == null || document.format != "three-unity-scene" || (document.version != 1 && document.version != 2 && document.version != 3 && document.version != 4 && document.version != 5 && document.version != 6))
+            if (document == null || document.format != "three-unity-scene" || document.version < 1 || document.version > 7)
             {
-                context.LogImportError("Unsupported document. Expected three-unity-scene format version 1, 2, 3, 4, 5, or 6.");
+                context.LogImportError("Unsupported document. Expected three-unity-scene format version 1, 2, 3, 4, 5, 6, or 7.");
                 return;
             }
 
@@ -239,6 +239,13 @@ namespace ThreeUnity.Bridge.Editor
 
         private Dictionary<string, Texture2D> ImportTextures(AssetImportContext context, TextureRecord[] records, int documentVersion)
         {
+            return documentVersion >= 7
+                ? ImportV7Textures(context, records)
+                : ImportLegacyTextures(context, records, documentVersion);
+        }
+
+        private Dictionary<string, Texture2D> ImportLegacyTextures(AssetImportContext context, TextureRecord[] records, int documentVersion)
+        {
             var result = new Dictionary<string, Texture2D>();
             foreach (var record in records)
             {
@@ -275,6 +282,308 @@ namespace ThreeUnity.Bridge.Editor
                 }
             }
             return result;
+        }
+
+        private static Dictionary<string, Texture2D> ImportV7Textures(AssetImportContext context, TextureRecord[] records)
+        {
+            var result = new Dictionary<string, Texture2D>();
+            foreach (var record in records)
+            {
+                if (record == null) throw new InvalidDataException("A version 7 texture record is null.");
+                if (string.IsNullOrEmpty(record.id)) throw new InvalidDataException("A version 7 texture record is missing its id.");
+                if (result.ContainsKey(record.id)) throw new InvalidDataException($"Texture id '{record.id}' appears more than once.");
+                if (string.IsNullOrEmpty(record.data)) throw new InvalidDataException($"Texture '{TextureLabel(record)}' has an empty payload.");
+
+                ValidateV7TextureSettings(record);
+                Texture2D texture;
+                switch (record.encoding)
+                {
+                    case "encoded-image":
+                        texture = ImportEncodedImage(record);
+                        break;
+                    case "raw":
+                        texture = ImportRawTexture(record);
+                        break;
+                    default:
+                        throw new InvalidDataException($"Texture '{TextureLabel(record)}' uses unsupported version 7 encoding '{record.encoding}'.");
+                }
+
+                texture.name = string.IsNullOrEmpty(record.name) ? record.id : record.name;
+                ApplyV7Sampler(context, record, texture);
+                result.Add(record.id, texture);
+            }
+
+            foreach (var record in records) context.AddObjectToAsset(record.id, result[record.id]);
+            return result;
+        }
+
+        private static Texture2D ImportEncodedImage(TextureRecord record)
+        {
+            if (record.mimeType != "image/png" && record.mimeType != "image/jpeg")
+                throw new InvalidDataException($"Texture '{TextureLabel(record)}' uses unsupported encoded image MIME type '{record.mimeType}'.");
+            if (!string.IsNullOrEmpty(record.pixelFormat) || !string.IsNullOrEmpty(record.componentType))
+                throw new InvalidDataException($"Texture '{TextureLabel(record)}' must leave pixelFormat and componentType empty for encoded-image data.");
+            if (record.width < 0 || record.height < 0)
+                throw new InvalidDataException($"Texture '{TextureLabel(record)}' has invalid encoded image dimensions {record.width}x{record.height}.");
+
+            var payload = DecodeTexturePayload(record);
+            ValidateEncodedImageMagic(record, payload);
+            var decoded = new Texture2D(2, 2, TextureFormat.RGBA32, false, true);
+            if (!decoded.LoadImage(payload, false))
+                throw new InvalidDataException($"Texture '{TextureLabel(record)}' image decoder rejected its {record.mimeType} payload.");
+
+            var bytesPerPixel = ReadDecodedBytesPerPixel(record, decoded.format);
+            var baseLevelByteCount = CheckedByteCount(record, decoded.width, decoded.height, bytesPerPixel);
+            var textureData = decoded.GetRawTextureData<byte>();
+            if (textureData.Length < baseLevelByteCount)
+                throw new InvalidDataException($"Texture '{TextureLabel(record)}' decoded to {decoded.width}x{decoded.height} {decoded.format}, but its raw storage contains only {textureData.Length} bytes; expected at least {baseLevelByteCount}.");
+            var baseLevel = new byte[baseLevelByteCount];
+            for (var index = 0; index < baseLevel.Length; index++) baseLevel[index] = textureData[index];
+            NormalizeRowsForUnity(baseLevel, decoded.width, decoded.height, bytesPerPixel, record.flipY, TexturePayloadKind.EncodedImage);
+            var texture = new Texture2D(decoded.width, decoded.height, decoded.format, record.mipmaps, ReadTextureLinear(record));
+            texture.SetPixelData(baseLevel, 0);
+            texture.Apply(record.mipmaps, false);
+            UnityEngine.Object.DestroyImmediate(decoded);
+            return texture;
+        }
+
+        private static Texture2D ImportRawTexture(TextureRecord record)
+        {
+            if (!string.IsNullOrEmpty(record.mimeType))
+                throw new InvalidDataException($"Texture '{TextureLabel(record)}' must leave mimeType empty for raw data.");
+            if (record.width <= 0 || record.height <= 0)
+                throw new InvalidDataException($"Texture '{TextureLabel(record)}' has invalid raw dimensions {record.width}x{record.height}.");
+
+            var channelCount = ReadRawChannelCount(record);
+            var bytesPerComponent = ReadRawBytesPerComponent(record);
+            var sourceBytesPerPixel = checked(channelCount * bytesPerComponent);
+            var expectedByteCount = CheckedByteCount(record, record.width, record.height, sourceBytesPerPixel);
+            var payload = DecodeTexturePayload(record);
+            if (payload.Length != expectedByteCount)
+                throw new InvalidDataException($"Texture '{TextureLabel(record)}' raw {record.width}x{record.height} {record.pixelFormat}/{record.componentType} payload has {payload.Length} bytes; expected exactly {expectedByteCount}.");
+
+            NormalizeRowsForUnity(payload, record.width, record.height, sourceBytesPerPixel, record.flipY, TexturePayloadKind.Raw);
+            var textureFormat = ReadRawTextureFormat(record);
+            if (record.pixelFormat == "rgb" && record.componentType != "uint8")
+                payload = ExpandRawRgbToRgba(payload, record.width, record.height, bytesPerComponent);
+            if (!SystemInfo.SupportsTextureFormat(textureFormat))
+                throw new InvalidDataException($"Texture '{TextureLabel(record)}' requires unsupported Unity texture format {textureFormat} for {record.pixelFormat}/{record.componentType} data.");
+
+            var texture = new Texture2D(record.width, record.height, textureFormat, record.mipmaps, ReadTextureLinear(record));
+            texture.SetPixelData(payload, 0);
+            texture.Apply(record.mipmaps, false);
+            return texture;
+        }
+
+        private static void ValidateV7TextureSettings(TextureRecord record)
+        {
+            ReadTextureLinear(record);
+            ReadTextureWrapMode(record.wrapS, TextureLabel(record));
+            ReadTextureWrapMode(record.wrapT, TextureLabel(record));
+            ReadTextureFilterMode(record);
+            if (!record.mipmaps && record.filterMode == "trilinear")
+                throw new InvalidDataException($"Texture '{TextureLabel(record)}' requests trilinear filtering without mipmaps.");
+            if (record.anisotropy < 1)
+                throw new InvalidDataException($"Texture '{TextureLabel(record)}' has invalid anisotropy {record.anisotropy}; expected an integer of at least 1.");
+        }
+
+        private static byte[] DecodeTexturePayload(TextureRecord record)
+        {
+            try
+            {
+                var payload = Convert.FromBase64String(record.data);
+                if (payload.Length == 0) throw new InvalidDataException($"Texture '{TextureLabel(record)}' decoded to an empty payload.");
+                return payload;
+            }
+            catch (FormatException exception)
+            {
+                throw new InvalidDataException($"Texture '{TextureLabel(record)}' payload is not valid base64.", exception);
+            }
+        }
+
+        private static void ValidateEncodedImageMagic(TextureRecord record, byte[] payload)
+        {
+            var isPng = payload.Length >= 8 &&
+                        payload[0] == 0x89 && payload[1] == 0x50 && payload[2] == 0x4e && payload[3] == 0x47 &&
+                        payload[4] == 0x0d && payload[5] == 0x0a && payload[6] == 0x1a && payload[7] == 0x0a;
+            var isJpeg = payload.Length >= 3 && payload[0] == 0xff && payload[1] == 0xd8 && payload[2] == 0xff;
+            if ((record.mimeType == "image/png" && !isPng) || (record.mimeType == "image/jpeg" && !isJpeg))
+                throw new InvalidDataException($"Texture '{TextureLabel(record)}' payload magic does not match MIME type {record.mimeType}.");
+        }
+
+        private static int ReadDecodedBytesPerPixel(TextureRecord record, TextureFormat format)
+        {
+            switch (format)
+            {
+                case TextureFormat.RGB24: return 3;
+                case TextureFormat.RGBA32:
+                case TextureFormat.ARGB32: return 4;
+                default: throw new InvalidDataException($"Texture '{TextureLabel(record)}' decoded to unsupported Unity texture format {format}.");
+            }
+        }
+
+        private static int ReadRawChannelCount(TextureRecord record)
+        {
+            switch (record.pixelFormat)
+            {
+                case "r": return 1;
+                case "rg": return 2;
+                case "rgb": return 3;
+                case "rgba": return 4;
+                default: throw new InvalidDataException($"Texture '{TextureLabel(record)}' uses unsupported raw pixel format '{record.pixelFormat}'.");
+            }
+        }
+
+        private static int ReadRawBytesPerComponent(TextureRecord record)
+        {
+            switch (record.componentType)
+            {
+                case "uint8": return 1;
+                case "float16": return 2;
+                case "float32": return 4;
+                default: throw new InvalidDataException($"Texture '{TextureLabel(record)}' uses unsupported raw component type '{record.componentType}'.");
+            }
+        }
+
+        private static TextureFormat ReadRawTextureFormat(TextureRecord record)
+        {
+            switch (record.componentType)
+            {
+                case "uint8":
+                    switch (record.pixelFormat)
+                    {
+                        case "r": return TextureFormat.R8;
+                        case "rg": return TextureFormat.RG16;
+                        case "rgb": return TextureFormat.RGB24;
+                        case "rgba": return TextureFormat.RGBA32;
+                    }
+                    break;
+                case "float16":
+                    switch (record.pixelFormat)
+                    {
+                        case "r": return TextureFormat.RHalf;
+                        case "rg": return TextureFormat.RGHalf;
+                        case "rgb":
+                        case "rgba": return TextureFormat.RGBAHalf;
+                    }
+                    break;
+                case "float32":
+                    switch (record.pixelFormat)
+                    {
+                        case "r": return TextureFormat.RFloat;
+                        case "rg": return TextureFormat.RGFloat;
+                        case "rgb":
+                        case "rgba": return TextureFormat.RGBAFloat;
+                    }
+                    break;
+            }
+            throw new InvalidDataException($"Texture '{TextureLabel(record)}' uses unsupported raw format {record.pixelFormat}/{record.componentType}.");
+        }
+
+        private static bool ReadTextureLinear(TextureRecord record)
+        {
+            switch (record.colorSpace)
+            {
+                case "srgb": return false;
+                case "linear":
+                case "none": return true;
+                default: throw new InvalidDataException($"Texture '{TextureLabel(record)}' uses unsupported color space '{record.colorSpace}'.");
+            }
+        }
+
+        private static FilterMode ReadTextureFilterMode(TextureRecord record)
+        {
+            switch (record.filterMode)
+            {
+                case "point": return FilterMode.Point;
+                case "bilinear": return FilterMode.Bilinear;
+                case "trilinear": return FilterMode.Trilinear;
+                default: throw new InvalidDataException($"Texture '{TextureLabel(record)}' uses unsupported filter mode '{record.filterMode}'.");
+            }
+        }
+
+        private static void ApplyV7Sampler(AssetImportContext context, TextureRecord record, Texture2D texture)
+        {
+            texture.wrapModeU = ReadTextureWrapMode(record.wrapS, TextureLabel(record));
+            texture.wrapModeV = ReadTextureWrapMode(record.wrapT, TextureLabel(record));
+            texture.filterMode = ReadTextureFilterMode(record);
+            if (record.anisotropy > 16)
+                context.LogImportWarning($"Texture '{TextureLabel(record)}' anisotropy {record.anisotropy} exceeds Unity's maximum 16 and was clamped to 16.");
+            texture.anisoLevel = Math.Min(record.anisotropy, 16);
+        }
+
+        private static int CheckedByteCount(TextureRecord record, int width, int height, int bytesPerPixel)
+        {
+            try
+            {
+                var value = checked((long)width * height * bytesPerPixel);
+                if (value > int.MaxValue) throw new OverflowException();
+                return (int)value;
+            }
+            catch (OverflowException exception)
+            {
+                throw new InvalidDataException($"Texture '{TextureLabel(record)}' dimensions {width}x{height} and {bytesPerPixel} bytes per pixel exceed Unity's supported payload size.", exception);
+            }
+        }
+
+        private static byte[] ExpandRawRgbToRgba(byte[] source, int width, int height, int bytesPerComponent)
+        {
+            var pixelCount = checked(width * height);
+            var target = new byte[checked(pixelCount * 4 * bytesPerComponent)];
+            for (var pixel = 0; pixel < pixelCount; pixel++)
+            {
+                var sourceOffset = pixel * 3 * bytesPerComponent;
+                var targetOffset = pixel * 4 * bytesPerComponent;
+                Buffer.BlockCopy(source, sourceOffset, target, targetOffset, 3 * bytesPerComponent);
+                if (bytesPerComponent == 2)
+                {
+                    target[targetOffset + 6] = 0x00;
+                    target[targetOffset + 7] = 0x3c;
+                }
+                else
+                {
+                    target[targetOffset + 12] = 0x00;
+                    target[targetOffset + 13] = 0x00;
+                    target[targetOffset + 14] = 0x80;
+                    target[targetOffset + 15] = 0x3f;
+                }
+            }
+            return target;
+        }
+
+        private static void NormalizeRowsForUnity(
+            byte[] payload,
+            int width,
+            int height,
+            int bytesPerPixel,
+            bool sourceFlipY,
+            TexturePayloadKind kind)
+        {
+            // Unity's decoded-image rows already follow its bottom-origin texture convention,
+            // which matches a Three.js image after the normal flipY=true upload. Raw typed-array
+            // row zero already maps to Unity y=0, matching Three.js flipY=false. The two source
+            // kinds therefore use opposite predicates, but every payload performs at most one row swap here.
+            var swapRows = kind == TexturePayloadKind.EncodedImage ? !sourceFlipY : sourceFlipY;
+            if (!swapRows || height < 2) return;
+            var rowByteCount = checked(width * bytesPerPixel);
+            var temporary = new byte[rowByteCount];
+            for (var top = 0; top < height / 2; top++)
+            {
+                var bottom = height - 1 - top;
+                var topOffset = top * rowByteCount;
+                var bottomOffset = bottom * rowByteCount;
+                Buffer.BlockCopy(payload, topOffset, temporary, 0, rowByteCount);
+                Buffer.BlockCopy(payload, bottomOffset, payload, topOffset, rowByteCount);
+                Buffer.BlockCopy(temporary, 0, payload, bottomOffset, rowByteCount);
+            }
+        }
+
+        private static string TextureLabel(TextureRecord record) => string.IsNullOrEmpty(record.name) ? record.id : record.name;
+
+        private enum TexturePayloadKind
+        {
+            EncodedImage,
+            Raw,
         }
 
         private Dictionary<string, Material> ImportMaterials(
@@ -316,9 +625,11 @@ namespace ThreeUnity.Bridge.Editor
                 animationCapabilities.TryGetValue(record.id, out var capabilities);
                 if (ReadColor(record.emissive, Color.black).maxColorComponent > 0f || capabilities?.emission == true)
                 {
-                    material.EnableKeyword("_EMISSION");
                     SetColor(material, "_EmissionColor", "_EmissionColor", ReadColor(record.emissive, Color.black));
                     SetTexture(material, "_EmissionMap", "_EmissionMap", record.emissiveTextureId, textures);
+                    if (documentVersion >= 7)
+                        material.globalIlluminationFlags &= ~MaterialGlobalIlluminationFlags.EmissiveIsBlack;
+                    material.EnableKeyword("_EMISSION");
                 }
                 ConfigureSurface(material, record.transparent || capabilities?.transparent == true, record.doubleSided);
                 context.AddObjectToAsset(record.id, material);
@@ -1705,7 +2016,12 @@ namespace ThreeUnity.Bridge.Editor
             public string baseColorTextureId; public string emissiveTextureId; public string normalTextureId; public float[] baseColorTextureST;
             public string renderMode = "surface"; public float pointSize = 1f; public bool sizeAttenuation = true; public float spriteRotation;
         }
-        [Serializable] private sealed class TextureRecord { public string id; public string name; public int width; public int height; public string encoding; public string data; public string wrapS; public string wrapT; }
+        [Serializable] private sealed class TextureRecord
+        {
+            public string id; public string name; public int width; public int height; public string encoding; public string data;
+            public string mimeType; public string pixelFormat; public string componentType; public bool flipY; public string colorSpace;
+            public string wrapS; public string wrapT; public string filterMode; public bool mipmaps; public int anisotropy;
+        }
         private sealed class MaterialAnimationCapabilities { public bool transparent; public bool emission; }
         private sealed class ImportedPrimitive
         {

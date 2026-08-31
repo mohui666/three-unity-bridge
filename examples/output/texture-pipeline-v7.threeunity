@@ -1,0 +1,1239 @@
+{
+  "format": "three-unity-scene",
+  "version": 7,
+  "generator": "three-unity-bridge/0.1.0",
+  "name": "Texture Sources and DataTexture",
+  "coordinateSystem": "threejs-right-handed-y-up",
+  "unitScaleMeters": 1,
+  "nodes": [
+    {
+      "id": "node_70000000000040008000000000000020",
+      "name": "Texture Sources and DataTexture",
+      "parentId": "",
+      "visible": true,
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "quaternion": [
+        0,
+        0,
+        0,
+        1
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ],
+      "layersMask": 1,
+      "meshId": "",
+      "primitiveId": "",
+      "instancedMeshId": "",
+      "skinId": "",
+      "morphWeights": [],
+      "metadataJson": "{}",
+      "components": []
+    },
+    {
+      "id": "node_70000000000040008000000000000021",
+      "name": "Texture Pipeline Camera",
+      "parentId": "node_70000000000040008000000000000020",
+      "visible": true,
+      "position": [
+        0,
+        0,
+        13
+      ],
+      "quaternion": [
+        0,
+        0,
+        0,
+        1
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ],
+      "layersMask": 1,
+      "meshId": "",
+      "primitiveId": "",
+      "instancedMeshId": "",
+      "skinId": "",
+      "morphWeights": [],
+      "metadataJson": "{}",
+      "components": [],
+      "camera": {
+        "type": "perspective",
+        "fov": 45,
+        "near": 0.1,
+        "far": 100,
+        "aspect": 1.7777777777777777,
+        "left": 0,
+        "right": 0,
+        "top": 0,
+        "bottom": 0
+      }
+    },
+    {
+      "id": "node_70000000000040008000000000000032",
+      "name": "Local Asymmetric PNG Panel",
+      "parentId": "node_70000000000040008000000000000020",
+      "visible": true,
+      "position": [
+        -5.4,
+        1.7,
+        0
+      ],
+      "quaternion": [
+        0,
+        0,
+        0,
+        1
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ],
+      "layersMask": 1,
+      "meshId": "mesh_70000000000040008000000000000030_70000000000040008000000000000031_static",
+      "primitiveId": "",
+      "instancedMeshId": "",
+      "skinId": "",
+      "morphWeights": [],
+      "metadataJson": "{}",
+      "components": []
+    },
+    {
+      "id": "node_70000000000040008000000000000035",
+      "name": "Loopback Asymmetric JPEG Panel",
+      "parentId": "node_70000000000040008000000000000020",
+      "visible": true,
+      "position": [
+        -1.8,
+        1.7,
+        0
+      ],
+      "quaternion": [
+        0,
+        0,
+        0,
+        1
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ],
+      "layersMask": 1,
+      "meshId": "mesh_70000000000040008000000000000033_70000000000040008000000000000034_static",
+      "primitiveId": "",
+      "instancedMeshId": "",
+      "skinId": "",
+      "morphWeights": [],
+      "metadataJson": "{}",
+      "components": []
+    },
+    {
+      "id": "node_70000000000040008000000000000038",
+      "name": "Uint8 R Panel",
+      "parentId": "node_70000000000040008000000000000020",
+      "visible": true,
+      "position": [
+        1.8,
+        1.7,
+        0
+      ],
+      "quaternion": [
+        0,
+        0,
+        0,
+        1
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ],
+      "layersMask": 1,
+      "meshId": "mesh_70000000000040008000000000000036_70000000000040008000000000000037_static",
+      "primitiveId": "",
+      "instancedMeshId": "",
+      "skinId": "",
+      "morphWeights": [],
+      "metadataJson": "{}",
+      "components": []
+    },
+    {
+      "id": "node_70000000000040008000000000000041",
+      "name": "Uint8 RG Panel",
+      "parentId": "node_70000000000040008000000000000020",
+      "visible": true,
+      "position": [
+        5.4,
+        1.7,
+        0
+      ],
+      "quaternion": [
+        0,
+        0,
+        0,
+        1
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ],
+      "layersMask": 1,
+      "meshId": "mesh_70000000000040008000000000000039_70000000000040008000000000000040_static",
+      "primitiveId": "",
+      "instancedMeshId": "",
+      "skinId": "",
+      "morphWeights": [],
+      "metadataJson": "{}",
+      "components": []
+    },
+    {
+      "id": "node_70000000000040008000000000000044",
+      "name": "Uint8 RGBA Panel",
+      "parentId": "node_70000000000040008000000000000020",
+      "visible": true,
+      "position": [
+        -5.4,
+        -1.7,
+        0
+      ],
+      "quaternion": [
+        0,
+        0,
+        0,
+        1
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ],
+      "layersMask": 1,
+      "meshId": "mesh_70000000000040008000000000000042_70000000000040008000000000000043_static",
+      "primitiveId": "",
+      "instancedMeshId": "",
+      "skinId": "",
+      "morphWeights": [],
+      "metadataJson": "{}",
+      "components": []
+    },
+    {
+      "id": "node_70000000000040008000000000000047",
+      "name": "HalfFloat RGB Panel",
+      "parentId": "node_70000000000040008000000000000020",
+      "visible": true,
+      "position": [
+        -1.8,
+        -1.7,
+        0
+      ],
+      "quaternion": [
+        0,
+        0,
+        0,
+        1
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ],
+      "layersMask": 1,
+      "meshId": "mesh_70000000000040008000000000000045_70000000000040008000000000000046_static",
+      "primitiveId": "",
+      "instancedMeshId": "",
+      "skinId": "",
+      "morphWeights": [],
+      "metadataJson": "{}",
+      "components": []
+    },
+    {
+      "id": "node_70000000000040008000000000000050",
+      "name": "Float32 RGBA Panel",
+      "parentId": "node_70000000000040008000000000000020",
+      "visible": true,
+      "position": [
+        1.8,
+        -1.7,
+        0
+      ],
+      "quaternion": [
+        0,
+        0,
+        0,
+        1
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ],
+      "layersMask": 1,
+      "meshId": "mesh_70000000000040008000000000000048_70000000000040008000000000000049_static",
+      "primitiveId": "",
+      "instancedMeshId": "",
+      "skinId": "",
+      "morphWeights": [],
+      "metadataJson": "{}",
+      "components": []
+    },
+    {
+      "id": "node_70000000000040008000000000000053",
+      "name": "Local PNG Shared Reference Panel",
+      "parentId": "node_70000000000040008000000000000020",
+      "visible": true,
+      "position": [
+        5.4,
+        -1.7,
+        0
+      ],
+      "quaternion": [
+        0,
+        0,
+        0,
+        1
+      ],
+      "scale": [
+        1,
+        1,
+        1
+      ],
+      "layersMask": 1,
+      "meshId": "mesh_70000000000040008000000000000051_70000000000040008000000000000052_static",
+      "primitiveId": "",
+      "instancedMeshId": "",
+      "skinId": "",
+      "morphWeights": [],
+      "metadataJson": "{}",
+      "components": []
+    }
+  ],
+  "meshes": [
+    {
+      "id": "mesh_70000000000040008000000000000030_70000000000040008000000000000031_static",
+      "name": "Local Asymmetric PNG Panel Geometry",
+      "positions": [
+        -1.25,
+        1.25,
+        0,
+        1.25,
+        1.25,
+        0,
+        -1.25,
+        -1.25,
+        0,
+        1.25,
+        -1.25,
+        0
+      ],
+      "normals": [
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        0,
+        0,
+        1
+      ],
+      "uv0": [
+        0,
+        1,
+        1,
+        1,
+        0,
+        0,
+        1,
+        0
+      ],
+      "colors": [],
+      "indices": [
+        0,
+        2,
+        1,
+        2,
+        3,
+        1
+      ],
+      "groups": [],
+      "materialIds": [
+        "material_70000000000040008000000000000031"
+      ],
+      "skinIndices": [],
+      "skinWeights": [],
+      "morphTargets": []
+    },
+    {
+      "id": "mesh_70000000000040008000000000000033_70000000000040008000000000000034_static",
+      "name": "Loopback Asymmetric JPEG Panel Geometry",
+      "positions": [
+        -1.25,
+        1.25,
+        0,
+        1.25,
+        1.25,
+        0,
+        -1.25,
+        -1.25,
+        0,
+        1.25,
+        -1.25,
+        0
+      ],
+      "normals": [
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        0,
+        0,
+        1
+      ],
+      "uv0": [
+        0,
+        1,
+        1,
+        1,
+        0,
+        0,
+        1,
+        0
+      ],
+      "colors": [],
+      "indices": [
+        0,
+        2,
+        1,
+        2,
+        3,
+        1
+      ],
+      "groups": [],
+      "materialIds": [
+        "material_70000000000040008000000000000034"
+      ],
+      "skinIndices": [],
+      "skinWeights": [],
+      "morphTargets": []
+    },
+    {
+      "id": "mesh_70000000000040008000000000000036_70000000000040008000000000000037_static",
+      "name": "Uint8 R Panel Geometry",
+      "positions": [
+        -1.25,
+        1.25,
+        0,
+        1.25,
+        1.25,
+        0,
+        -1.25,
+        -1.25,
+        0,
+        1.25,
+        -1.25,
+        0
+      ],
+      "normals": [
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        0,
+        0,
+        1
+      ],
+      "uv0": [
+        0,
+        1,
+        1,
+        1,
+        0,
+        0,
+        1,
+        0
+      ],
+      "colors": [],
+      "indices": [
+        0,
+        2,
+        1,
+        2,
+        3,
+        1
+      ],
+      "groups": [],
+      "materialIds": [
+        "material_70000000000040008000000000000037"
+      ],
+      "skinIndices": [],
+      "skinWeights": [],
+      "morphTargets": []
+    },
+    {
+      "id": "mesh_70000000000040008000000000000039_70000000000040008000000000000040_static",
+      "name": "Uint8 RG Panel Geometry",
+      "positions": [
+        -1.25,
+        1.25,
+        0,
+        1.25,
+        1.25,
+        0,
+        -1.25,
+        -1.25,
+        0,
+        1.25,
+        -1.25,
+        0
+      ],
+      "normals": [
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        0,
+        0,
+        1
+      ],
+      "uv0": [
+        0,
+        1,
+        1,
+        1,
+        0,
+        0,
+        1,
+        0
+      ],
+      "colors": [],
+      "indices": [
+        0,
+        2,
+        1,
+        2,
+        3,
+        1
+      ],
+      "groups": [],
+      "materialIds": [
+        "material_70000000000040008000000000000040"
+      ],
+      "skinIndices": [],
+      "skinWeights": [],
+      "morphTargets": []
+    },
+    {
+      "id": "mesh_70000000000040008000000000000042_70000000000040008000000000000043_static",
+      "name": "Uint8 RGBA Panel Geometry",
+      "positions": [
+        -1.25,
+        1.25,
+        0,
+        1.25,
+        1.25,
+        0,
+        -1.25,
+        -1.25,
+        0,
+        1.25,
+        -1.25,
+        0
+      ],
+      "normals": [
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        0,
+        0,
+        1
+      ],
+      "uv0": [
+        0,
+        1,
+        1,
+        1,
+        0,
+        0,
+        1,
+        0
+      ],
+      "colors": [],
+      "indices": [
+        0,
+        2,
+        1,
+        2,
+        3,
+        1
+      ],
+      "groups": [],
+      "materialIds": [
+        "material_70000000000040008000000000000043"
+      ],
+      "skinIndices": [],
+      "skinWeights": [],
+      "morphTargets": []
+    },
+    {
+      "id": "mesh_70000000000040008000000000000045_70000000000040008000000000000046_static",
+      "name": "HalfFloat RGB Panel Geometry",
+      "positions": [
+        -1.25,
+        1.25,
+        0,
+        1.25,
+        1.25,
+        0,
+        -1.25,
+        -1.25,
+        0,
+        1.25,
+        -1.25,
+        0
+      ],
+      "normals": [
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        0,
+        0,
+        1
+      ],
+      "uv0": [
+        0,
+        1,
+        1,
+        1,
+        0,
+        0,
+        1,
+        0
+      ],
+      "colors": [],
+      "indices": [
+        0,
+        2,
+        1,
+        2,
+        3,
+        1
+      ],
+      "groups": [],
+      "materialIds": [
+        "material_70000000000040008000000000000046"
+      ],
+      "skinIndices": [],
+      "skinWeights": [],
+      "morphTargets": []
+    },
+    {
+      "id": "mesh_70000000000040008000000000000048_70000000000040008000000000000049_static",
+      "name": "Float32 RGBA Panel Geometry",
+      "positions": [
+        -1.25,
+        1.25,
+        0,
+        1.25,
+        1.25,
+        0,
+        -1.25,
+        -1.25,
+        0,
+        1.25,
+        -1.25,
+        0
+      ],
+      "normals": [
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        0,
+        0,
+        1
+      ],
+      "uv0": [
+        0,
+        1,
+        1,
+        1,
+        0,
+        0,
+        1,
+        0
+      ],
+      "colors": [],
+      "indices": [
+        0,
+        2,
+        1,
+        2,
+        3,
+        1
+      ],
+      "groups": [],
+      "materialIds": [
+        "material_70000000000040008000000000000049"
+      ],
+      "skinIndices": [],
+      "skinWeights": [],
+      "morphTargets": []
+    },
+    {
+      "id": "mesh_70000000000040008000000000000051_70000000000040008000000000000052_static",
+      "name": "Local PNG Shared Reference Panel Geometry",
+      "positions": [
+        -1.25,
+        1.25,
+        0,
+        1.25,
+        1.25,
+        0,
+        -1.25,
+        -1.25,
+        0,
+        1.25,
+        -1.25,
+        0
+      ],
+      "normals": [
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        0,
+        0,
+        1
+      ],
+      "uv0": [
+        0,
+        1,
+        1,
+        1,
+        0,
+        0,
+        1,
+        0
+      ],
+      "colors": [],
+      "indices": [
+        0,
+        2,
+        1,
+        2,
+        3,
+        1
+      ],
+      "groups": [],
+      "materialIds": [
+        "material_70000000000040008000000000000052"
+      ],
+      "skinIndices": [],
+      "skinWeights": [],
+      "morphTargets": []
+    }
+  ],
+  "instancedMeshes": [],
+  "primitives": [],
+  "skins": [],
+  "animations": [],
+  "defaultAnimationId": "",
+  "autoplayAnimation": false,
+  "materials": [
+    {
+      "id": "material_70000000000040008000000000000031",
+      "name": "Local Asymmetric PNG Panel Material",
+      "sourceType": "MeshBasicMaterial",
+      "baseColor": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "metallic": 0,
+      "roughness": 0.5,
+      "opacity": 1,
+      "transparent": false,
+      "doubleSided": false,
+      "alphaCutoff": 0,
+      "unlit": true,
+      "vertexColors": false,
+      "baseColorTextureId": "texture_70000000000040008000000000000001",
+      "baseColorTextureST": [
+        1.75,
+        1.25,
+        0.08,
+        0.05
+      ],
+      "emissiveTextureId": "",
+      "normalTextureId": "",
+      "metallicRoughnessTextureId": "",
+      "renderMode": "surface",
+      "pointSize": 1,
+      "sizeAttenuation": true,
+      "spriteRotation": 0
+    },
+    {
+      "id": "material_70000000000040008000000000000034",
+      "name": "Loopback Asymmetric JPEG Panel Material",
+      "sourceType": "MeshBasicMaterial",
+      "baseColor": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "metallic": 0,
+      "roughness": 0.5,
+      "opacity": 1,
+      "transparent": false,
+      "doubleSided": false,
+      "alphaCutoff": 0,
+      "unlit": true,
+      "vertexColors": false,
+      "baseColorTextureId": "texture_70000000000040008000000000000002",
+      "baseColorTextureST": [
+        1.75,
+        1.25,
+        0,
+        0
+      ],
+      "emissiveTextureId": "",
+      "normalTextureId": "",
+      "metallicRoughnessTextureId": "",
+      "renderMode": "surface",
+      "pointSize": 1,
+      "sizeAttenuation": true,
+      "spriteRotation": 0
+    },
+    {
+      "id": "material_70000000000040008000000000000037",
+      "name": "Uint8 R Panel Material",
+      "sourceType": "MeshBasicMaterial",
+      "baseColor": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "metallic": 0,
+      "roughness": 0.5,
+      "opacity": 1,
+      "transparent": false,
+      "doubleSided": false,
+      "alphaCutoff": 0,
+      "unlit": true,
+      "vertexColors": false,
+      "baseColorTextureId": "texture_70000000000040008000000000000003",
+      "baseColorTextureST": [
+        1,
+        1,
+        0,
+        0
+      ],
+      "emissiveTextureId": "",
+      "normalTextureId": "",
+      "metallicRoughnessTextureId": "",
+      "renderMode": "surface",
+      "pointSize": 1,
+      "sizeAttenuation": true,
+      "spriteRotation": 0
+    },
+    {
+      "id": "material_70000000000040008000000000000040",
+      "name": "Uint8 RG Panel Material",
+      "sourceType": "MeshBasicMaterial",
+      "baseColor": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "metallic": 0,
+      "roughness": 0.5,
+      "opacity": 1,
+      "transparent": false,
+      "doubleSided": false,
+      "alphaCutoff": 0,
+      "unlit": true,
+      "vertexColors": false,
+      "baseColorTextureId": "texture_70000000000040008000000000000004",
+      "baseColorTextureST": [
+        1,
+        1,
+        0,
+        0
+      ],
+      "emissiveTextureId": "",
+      "normalTextureId": "",
+      "metallicRoughnessTextureId": "",
+      "renderMode": "surface",
+      "pointSize": 1,
+      "sizeAttenuation": true,
+      "spriteRotation": 0
+    },
+    {
+      "id": "material_70000000000040008000000000000043",
+      "name": "Uint8 RGBA Panel Material",
+      "sourceType": "MeshBasicMaterial",
+      "baseColor": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "metallic": 0,
+      "roughness": 0.5,
+      "opacity": 1,
+      "transparent": false,
+      "doubleSided": false,
+      "alphaCutoff": 0,
+      "unlit": true,
+      "vertexColors": false,
+      "baseColorTextureId": "texture_70000000000040008000000000000005",
+      "baseColorTextureST": [
+        1,
+        1,
+        0,
+        0
+      ],
+      "emissiveTextureId": "",
+      "normalTextureId": "",
+      "metallicRoughnessTextureId": "",
+      "renderMode": "surface",
+      "pointSize": 1,
+      "sizeAttenuation": true,
+      "spriteRotation": 0
+    },
+    {
+      "id": "material_70000000000040008000000000000046",
+      "name": "HalfFloat RGB Panel Material",
+      "sourceType": "MeshBasicMaterial",
+      "baseColor": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "metallic": 0,
+      "roughness": 0.5,
+      "opacity": 1,
+      "transparent": false,
+      "doubleSided": false,
+      "alphaCutoff": 0,
+      "unlit": true,
+      "vertexColors": false,
+      "baseColorTextureId": "texture_70000000000040008000000000000006",
+      "baseColorTextureST": [
+        1,
+        1,
+        0,
+        0
+      ],
+      "emissiveTextureId": "",
+      "normalTextureId": "",
+      "metallicRoughnessTextureId": "",
+      "renderMode": "surface",
+      "pointSize": 1,
+      "sizeAttenuation": true,
+      "spriteRotation": 0
+    },
+    {
+      "id": "material_70000000000040008000000000000049",
+      "name": "Float32 RGBA Panel Material",
+      "sourceType": "MeshBasicMaterial",
+      "baseColor": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "metallic": 0,
+      "roughness": 0.5,
+      "opacity": 1,
+      "transparent": false,
+      "doubleSided": false,
+      "alphaCutoff": 0,
+      "unlit": true,
+      "vertexColors": false,
+      "baseColorTextureId": "texture_70000000000040008000000000000007",
+      "baseColorTextureST": [
+        1,
+        1,
+        0,
+        0
+      ],
+      "emissiveTextureId": "",
+      "normalTextureId": "",
+      "metallicRoughnessTextureId": "",
+      "renderMode": "surface",
+      "pointSize": 1,
+      "sizeAttenuation": true,
+      "spriteRotation": 0
+    },
+    {
+      "id": "material_70000000000040008000000000000052",
+      "name": "Local PNG Shared Reference Panel Material",
+      "sourceType": "MeshBasicMaterial",
+      "baseColor": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "emissive": [
+        0,
+        0,
+        0
+      ],
+      "metallic": 0,
+      "roughness": 0.5,
+      "opacity": 1,
+      "transparent": false,
+      "doubleSided": false,
+      "alphaCutoff": 0,
+      "unlit": true,
+      "vertexColors": false,
+      "baseColorTextureId": "texture_70000000000040008000000000000001",
+      "baseColorTextureST": [
+        1.75,
+        1.25,
+        0.08,
+        0.05
+      ],
+      "emissiveTextureId": "",
+      "normalTextureId": "",
+      "metallicRoughnessTextureId": "",
+      "renderMode": "surface",
+      "pointSize": 1,
+      "sizeAttenuation": true,
+      "spriteRotation": 0
+    }
+  ],
+  "textures": [
+    {
+      "id": "texture_70000000000040008000000000000001",
+      "name": "Local Asymmetric PNG",
+      "width": 0,
+      "height": 0,
+      "encoding": "encoded-image",
+      "data": "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAAeSURBVChTY/jPwPAfGWOBNFeAJv///38QgcB0UAAAN5uPcRzZBK4AAAAASUVORK5CYII=",
+      "mimeType": "image/png",
+      "pixelFormat": "",
+      "componentType": "",
+      "flipY": true,
+      "colorSpace": "srgb",
+      "wrapS": "repeat",
+      "wrapT": "clamp",
+      "filterMode": "trilinear",
+      "mipmaps": true,
+      "anisotropy": 4
+    },
+    {
+      "id": "texture_70000000000040008000000000000002",
+      "name": "Loopback Asymmetric JPEG",
+      "width": 0,
+      "height": 0,
+      "encoding": "encoded-image",
+      "data": "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAIBAQIBAQICAgICAgICAwUDAwMDAwYEBAMFBwYHBwcGBwcICQsJCAgKCAcHCg0KCgsMDAwMBwkODw0MDgsMDAz/2wBDAQICAgMDAwYDAwYMCAcIDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAz/wAARCAAIAAgDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDA/wCCCngr/hsr/ha3+k/8I5/wjn9kf8s/tn2jz/t3vHt2+T753dsclFFf56ftAsHR4E8fM+4V4VX1fBYf6r7OnrPl58Fhqkveqc83ec5S96TteyskkvO4j8M+G/EzManG3G2G+tZjire1q89SnzeziqMPcozp048tOnCPuwV7Xd5Nt//Z",
+      "mimeType": "image/jpeg",
+      "pixelFormat": "",
+      "componentType": "",
+      "flipY": true,
+      "colorSpace": "srgb",
+      "wrapS": "mirror",
+      "wrapT": "repeat",
+      "filterMode": "bilinear",
+      "mipmaps": false,
+      "anisotropy": 2
+    },
+    {
+      "id": "texture_70000000000040008000000000000003",
+      "name": "Uint8 R",
+      "width": 4,
+      "height": 4,
+      "encoding": "raw",
+      "data": "AFWq/wBVqv8AVar/AFWq/w==",
+      "mimeType": "",
+      "pixelFormat": "r",
+      "componentType": "uint8",
+      "flipY": false,
+      "colorSpace": "none",
+      "wrapS": "clamp",
+      "wrapT": "clamp",
+      "filterMode": "point",
+      "mipmaps": false,
+      "anisotropy": 1
+    },
+    {
+      "id": "texture_70000000000040008000000000000004",
+      "name": "Uint8 RG",
+      "width": 4,
+      "height": 4,
+      "encoding": "raw",
+      "data": "AABVAKoA/wAAVVVVqlX/VQCqVaqqqv+qAP9V/6r///8=",
+      "mimeType": "",
+      "pixelFormat": "rg",
+      "componentType": "uint8",
+      "flipY": false,
+      "colorSpace": "none",
+      "wrapS": "repeat",
+      "wrapT": "mirror",
+      "filterMode": "bilinear",
+      "mipmaps": false,
+      "anisotropy": 2
+    },
+    {
+      "id": "texture_70000000000040008000000000000005",
+      "name": "Uint8 RGBA",
+      "width": 4,
+      "height": 4,
+      "encoding": "raw",
+      "data": "/zAg//8wIP8w/0D/MP9A//8wIP//MCD/MP9A/zD/QP8wYP//MGD////gIP//4CD/MGD//zBg////4CD//+Ag/w==",
+      "mimeType": "",
+      "pixelFormat": "rgba",
+      "componentType": "uint8",
+      "flipY": false,
+      "colorSpace": "none",
+      "wrapS": "mirror",
+      "wrapT": "clamp",
+      "filterMode": "point",
+      "mipmaps": true,
+      "anisotropy": 3
+    },
+    {
+      "id": "texture_70000000000040008000000000000006",
+      "name": "HalfFloat RGB",
+      "width": 4,
+      "height": 4,
+      "encoding": "raw",
+      "data": "ADwAAAAAADwAAAAAAAAAPAAAAAAAPAAAADwAAAAAADwAAAAAAAAAPAAAAAAAPAAAAAAAAAA8AAAAAAA8ADwAPAAAADwAPAAAAAAAAAA8AAAAAAA8ADwAPAAAADwAPAAA",
+      "mimeType": "",
+      "pixelFormat": "rgb",
+      "componentType": "float16",
+      "flipY": false,
+      "colorSpace": "none",
+      "wrapS": "repeat",
+      "wrapT": "repeat",
+      "filterMode": "trilinear",
+      "mipmaps": true,
+      "anisotropy": 8
+    },
+    {
+      "id": "texture_70000000000040008000000000000007",
+      "name": "Float32 RGBA",
+      "width": 4,
+      "height": 4,
+      "encoding": "raw",
+      "data": "AAAAAAAAAAAAAAAAAACAP6uqqj4AAAAAAACAPwAAgD+rqio/AAAAAAAAAAAAAIA/AACAPwAAAAAAAIA/AACAPwAAAACrqqo+AACAPwAAgD+rqqo+q6qqPgAAAAAAAIA/q6oqP6uqqj4AAIA/AACAPwAAgD+rqqo+AAAAAAAAgD8AAAAAq6oqPwAAAAAAAIA/q6qqPquqKj8AAIA/AACAP6uqKj+rqio/AAAAAAAAgD8AAIA/q6oqPwAAgD8AAIA/AAAAAAAAgD8AAIA/AACAP6uqqj4AAIA/AAAAAAAAgD+rqio/AACAPwAAgD8AAIA/AACAPwAAgD8AAAAAAACAPw==",
+      "mimeType": "",
+      "pixelFormat": "rgba",
+      "componentType": "float32",
+      "flipY": false,
+      "colorSpace": "none",
+      "wrapS": "clamp",
+      "wrapT": "mirror",
+      "filterMode": "bilinear",
+      "mipmaps": false,
+      "anisotropy": 4
+    }
+  ],
+  "runtime": {
+    "controller": "none",
+    "colliderMode": "none",
+    "enableBlockEditing": false,
+    "allowFly": false,
+    "hudStyle": "diagnostic",
+    "moveSpeed": 5.5,
+    "sprintSpeed": 9,
+    "flySpeed": 8,
+    "hotbar": []
+  },
+  "warnings": []
+}
