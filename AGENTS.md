@@ -40,7 +40,7 @@ This repository builds a reusable Three.js-to-Unity bridge. Preserve the origina
 - Do not add defensive branches for hypothetical failures, silent fallbacks, automatic repair, redundant retries, or parallel compatibility paths unless the requested behavior defines them. Follow the declared contract directly and surface a precise error when it is violated.
 - Do not edit generated `dist/`, `dist-tests/`, `.NET bin/obj`, Unity `Library/Temp/Logs/Build`, or ignored integration workspaces as if they were source.
 - Do not copy source from an ignored upstream clone into the bridge without checking its license and keeping game fixes separated from reusable bridge changes.
-- Commit task-owned changes automatically after the required validation unless the user asks to leave them uncommitted. Do not push, open a PR, or rewrite history unless the user explicitly asks. Stage only paths owned by the current task.
+- Commit and push task-owned changes automatically after the required validation unless the user asks to leave them uncommitted or unpushed. Do not open a PR or rewrite history unless the user explicitly asks. Stage only paths owned by the current task.
 - Never commit credentials, local machine paths, WebView profiles, crash dumps, packaged Players, or dependency directories.
 - Keep TypeScript as ESM and compatible with the Node version in `package.json`.
 - Keep Runtime C# compatible with the Unity version currently used by the validation project. Avoid Editor-only APIs in `unity-package/Runtime`.
