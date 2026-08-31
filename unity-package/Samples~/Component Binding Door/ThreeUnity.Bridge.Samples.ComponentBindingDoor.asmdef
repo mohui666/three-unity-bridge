@@ -1,0 +1,7 @@
+{
+  "name": "ThreeUnity.Bridge.Samples.ComponentBindingDoor",
+  "rootNamespace": "ThreeUnity.Bridge.Samples.ComponentBindingDoor",
+  "references": [
+    "ThreeUnity.Bridge.Runtime"
+  ]
+}

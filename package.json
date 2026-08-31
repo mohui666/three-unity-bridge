@@ -35,6 +35,7 @@
     "benchmark:input": "npm run build && node benchmarks/input-transport.mjs",
     "example": "npm run build && node examples/generate-scene.mjs",
     "example:animated": "npm run build && node examples/generate-skinned-animation.mjs",
+    "example:components": "npm run build && node examples/generate-component-binding.mjs",
     "conversions:capture": "node conversion-tools/capture-games.mjs"
   },
   "keywords": [

@@ -8,7 +8,7 @@ using UnityEngine.Rendering;
 
 namespace ThreeUnity.Bridge.Editor
 {
-    [ScriptedImporter(5, "threeunity")]
+    [ScriptedImporter(6, "threeunity")]
     public sealed class ThreeUnityImporter : ScriptedImporter
     {
         [SerializeField] private bool importCameras = true;
@@ -36,6 +36,7 @@ namespace ThreeUnity.Bridge.Editor
 
             var root = new GameObject(string.IsNullOrEmpty(document.name) ? Path.GetFileNameWithoutExtension(context.assetPath) : document.name);
             AttachRuntimeProfile(root, document.runtime);
+            if (HasComponentDescriptors(document.nodes)) root.AddComponent<ThreeUnityComponentApplicator>();
             var textures = ImportTextures(context, document.textures ?? Array.Empty<TextureRecord>());
             var materials = ImportMaterials(context, document.materials ?? Array.Empty<MaterialRecord>(), textures);
             var meshes = ImportMeshes(context, document.meshes ?? Array.Empty<MeshRecord>(), document.unitScaleMeters);
@@ -104,6 +105,15 @@ namespace ThreeUnity.Bridge.Editor
                 record.controller, record.colliderMode, record.enableBlockEditing,
                 record.allowFly, record.hudStyle, record.moveSpeed,
                 record.sprintSpeed, record.flySpeed, items);
+        }
+
+        private static bool HasComponentDescriptors(NodeRecord[] nodes)
+        {
+            foreach (var node in nodes ?? Array.Empty<NodeRecord>())
+            {
+                if (node.components != null && node.components.Length > 0) return true;
+            }
+            return false;
         }
 
         private static Dictionary<string, SkinRecord> IndexSkins(SkinRecord[] records)

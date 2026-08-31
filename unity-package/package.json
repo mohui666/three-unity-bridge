@@ -23,6 +23,11 @@
       "displayName": "Animated Skinned Mesh",
       "description": "A self-contained animated .threeunity character with a skinned mesh, bone hierarchy, and looping clip.",
       "path": "Samples~/Animated Skinned Mesh"
+    },
+    {
+      "displayName": "Component Binding Door",
+      "description": "Binds a Door descriptor to a sample MonoBehaviour that opens automatically from descriptor data.",
+      "path": "Samples~/Component Binding Door"
     }
   ]
 }

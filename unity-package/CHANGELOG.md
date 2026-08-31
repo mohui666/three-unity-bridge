@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added explicit `ThreeUnityComponentBindings` registration and the hierarchy-scoped `ThreeUnityComponentApplicator`, allowing existing `type + dataJson` descriptors to configure project-owned components without reflection or import-time execution.
+- The importer now adds the runtime applicator only to assets that contain component descriptors, and the new Component Binding Door sample demonstrates visible descriptor-driven behavior.
 - Added `.threeunity` format v2 for `SkinnedMesh`, stable node-id bone references, four-weight skinning, bind poses, and baked transform animation tracks.
 - Added Unity `SkinnedMeshRenderer` import, `AnimationClip` subassets, and `ThreeUnityAnimationPlayer` for controller-free default playback and clip-name playback.
 - Added a self-contained animated three-bone sample and focused exporter/importer deformation smoke coverage while retaining v1 static-asset import compatibility.

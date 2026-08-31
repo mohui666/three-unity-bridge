@@ -24,6 +24,7 @@
 npm install
 npm run example
 npm run example:animated
+npm run example:components
 npx three-unity install-unity C:\Path\To\UnityProject
 npx three-unity copy .\examples\output\three-unity-demo.threeunity C:\Path\To\UnityProject
 npx three-unity build-unity .\scene.threeunity C:\Path\To\UnityProject
@@ -36,7 +37,7 @@ unity-package/package.json
 ```
 
 导入后，选中 `.threeunity` 可在 Inspector 中决定是否导入 Camera、Light、MeshCollider。
-也可以从 Unity Package Manager 的 **Samples** 导入 `Imported Triangle` 或 `Animated Skinned Mesh`；后者拖进 Scene 后点击 Play，会直接循环播放真实蒙皮弯曲，无需手工创建 Animator Controller。
+也可以从 Unity Package Manager 的 **Samples** 导入 `Imported Triangle`、`Animated Skinned Mesh` 或 `Component Binding Door`。动画示例会直接循环播放真实蒙皮弯曲；门示例会把 descriptor 显式绑定为 sample 自己的 `Door` MonoBehaviour，并在 Play 后自动开门。
 
 ## Three.js 代码接入
 
@@ -150,22 +151,53 @@ Player 每 120 个物理帧输出一条 `THREE_UNITY_BRIDGE_PERF`，包含收发
 
 `name-to-shop` 的同机实测中，静止商店跑到 240 个 Unity 物理帧时，Unity→Web 从 184 条 / 40,166 字符降到 20 条 / 4,262 字符，分别减少 89.1% 和 89.4%。重建后的实体 Player 报告 `metadataFast=21 metadataFallback=0 flushBudgetStops=0 maxFlush=2 lifecycleEmitted=2 lifecycleAck=2 lifecycleAckRejected=0`。LittleCubes 的 session-aware 240 FPS 输入基准把 Web→Unity 消息从 2,400 条降到 140 条（94.2%），协议字符减少 93.9%；真实 Player 的空闲输入由 180 条/秒降到约 4 条/秒，且 `dropped=0`。体素窗口复用使碰撞采样减少 90.8%，计入每条消息的 `sessionId` 后，`collision-delta-v2` 仍使协议字符减少 45.2%。Unity `6000.3.22f1` 的真实故障注入已分别验证两个 profile：LittleCubes 在输入失效后完成一次会话重建、新会话 ready 和后续逻辑 tick；name-to-shop 在 Web 请求回退后同样完成一次重建、新 ready、生命周期重新确认和后续 tick。两次运行都没有遗留孤儿 Host，性能标记均为 `dropped=0`。关闭 Player 后，嵌入式 WebView Host 在先前实测中于 140ms 内随父进程退出。测试方法、日志字段和扩展规则见 [`docs/BRIDGE_PERFORMANCE.md`](docs/BRIDGE_PERFORMANCE.md)。
 
-## 把游戏语义传给 Unity
+## 把组件描述绑定为项目 C# 类型
 
-Three.js 的 `userData` 会保留到 Unity 的 `ThreeUnityMetadata`：
+Three.js 的 `userData.unity.components` 会以 `type + dataJson` 保留到 Unity 的 `ThreeUnityMetadata`：
 
 ```ts
-mesh.userData = {
-  gameplayTag: "door",
+doorPivot.userData = {
   unity: {
     components: [
-      { type: "Door", data: { locked: true, keyId: "red-key" } },
+      {
+        type: "Door",
+        data: { openAngle: 95, duration: 0.45, startsOpen: false },
+      },
     ],
   },
 };
 ```
 
-第一版不会根据字符串自动执行或生成 C#，避免导入资产时运行不受信代码。游戏项目可以读取 `ThreeUnityMetadata.Components`，用自己的白名单工厂把 `Door`、`SpawnPoint` 等描述转换成真实 MonoBehaviour。
+项目用精确字符串显式登记允许创建的类型；包不会反射程序集、猜测类型名或在导入阶段执行 binder：
+
+```csharp
+using System;
+using ThreeUnity.Bridge;
+using UnityEngine;
+
+[Serializable]
+public sealed class DoorData
+{
+    public float openAngle;
+    public float duration;
+    public bool startsOpen;
+}
+
+public static class DoorBindings
+{
+    [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
+    private static void RegisterBindings()
+    {
+        ThreeUnityComponentBindings.Register<DoorData, Door>(
+            "Door",
+            (door, data) => door.Configure(data.openAngle, data.duration, data.startsOpen));
+    }
+}
+```
+
+只要文档包含 descriptor，importer 就会在生成资产根节点附加 `ThreeUnityComponentApplicator`。它默认在 `Awake` 扫描当前实例层级（包括 inactive 子节点），为已登记 key 取得或添加组件并配置 JSON；`Apply()` 可手动重跑且不会重复添加同类型组件。它返回 `ThreeUnityComponentApplicationResult`，最近一次计数也可从 `LastResult` 读取。新组件的 `Awake` / `OnEnable` 会先于 `configure`，因此组件应在 `Configure` 本身、`Start` 或更晚阶段消费 descriptor 配置。未登记 descriptor 仍保留在 metadata 中并计为 `Unmapped`，解析或配置异常计为 `Failed`，其余 descriptor 继续处理。
+
+运行 `npm run example:components` 可重新生成 `examples/output/component-binding-door.threeunity`。也可以从 UPM 导入 `Component Binding Door` Sample，拖入生成资产并进入 Play：`Door Pivot` 会得到真实 `Door` 组件，并按 descriptor 的 95° / 0.45 秒参数自动打开。
 
 ## 转换规则
 
@@ -187,7 +219,7 @@ mesh.userData = {
 - HDRP 专用 Shader 映射。
 - 外链纹理；纹理必须能在导出时读取并嵌入，跨域图片需配置 CORS。
 
-这些边界会作为导出 warnings 写入文件，并显示在 Unity Import Log。后续可以扩展更多动画类型，以及可配置的“组件描述 → 项目 C# 类型”白名单映射。
+这些边界会作为导出 warnings 写入文件，并显示在 Unity Import Log。项目组件只能通过上述显式白名单绑定；这不会把任意 JavaScript 自动翻译成 C#。
 
 ## 开源游戏实转
 
