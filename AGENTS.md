@@ -55,7 +55,7 @@ npm run build
 dotnet test .\webview-host-tests\ThreeUnityWebHost.Tests.csproj -c Release
 ```
 
-For Unity package changes, install/copy `unity-package` into a disposable Unity project and run EditMode tests in batch mode. The authoritative result is the generated XML with a completed, nonzero test count and zero failures; a process exit or `Total: 0` is not a pass.
+For Unity package changes, run `npm run samples:generate` first, then install/copy `unity-package` into a disposable Unity project and run EditMode tests in batch mode. The authoritative result is the generated XML with a completed, nonzero test count and zero failures; a process exit or `Total: 0` is not a pass.
 
 For Web Bridge lifecycle or packaging changes, also:
 

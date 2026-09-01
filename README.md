@@ -119,6 +119,15 @@ flowchart LR
 - Web Bridge 额外需要 .NET 8 SDK 与 WebView2 Evergreen Runtime
 - 当前仓库验证环境：Unity `6000.3.22f1`
 
+`.threeunity` 是可重建的转换产物，不进入 Git。源码 checkout 在使用本地 UPM Samples 或运行 Unity importer tests 前，先执行：
+
+```powershell
+npm install
+npm run samples:generate
+```
+
+该命令一次构建并生成全部示例，再把九个 Sample 载荷同步到 `unity-package/Samples~`；生成文件均被 Git 忽略。`npm pack` / `npm publish` 会通过 `prepack` 自动执行同一步，因此打包产物仍包含完整 Samples。直接 Git-URL UPM 安装不会运行 Node `prepack`；需要 Samples 时请使用打包版本，或在本地 checkout 生成后通过磁盘安装 `unity-package`。
+
 ### 本地/HTTP 图片与 DataTexture 可见闭环
 
 ```powershell
@@ -293,7 +302,7 @@ node .\dist\cli.js build-web-unity `
 
 | npm script | 输出 | UPM Sample | 展示内容 |
 |---|---|---|---|
-| `npm run example` | `three-unity-demo.threeunity` | Imported Triangle | 静态层级与最小 importer 闭环 |
+| `npm run samples:generate` | `imported-triangle-v1.threeunity` | Imported Triangle | format-v1 静态兼容与最小 importer 闭环 |
 | `npm run example:animated` | `animated-skinned-mesh.threeunity` | Animated Skinned Mesh | Bone、Skinning、Bind Pose 与循环 AnimationClip |
 | `npm run example:morph` | `morph-target-animation.threeunity` | Morph Target Animation | `Bulge` / `Twist` BlendShape 与 morph-weight 动画 |
 | `npm run example:material` | `material-uv-animation.threeunity` | Material UV Animation | 共享材质、颜色/发光/透明/粗糙度与 base-map offset/repeat 动画 |
@@ -303,7 +312,7 @@ node .\dist\cli.js build-web-unity `
 | `npm run example:textures` | `texture-pipeline-v7.threeunity` | Texture Sources and DataTexture | 本地 PNG、HTTP JPEG、uint8/half/float 数据纹理、方向、颜色空间与采样器 |
 | `npm run example:pbr` | `pbr-material-maps-v8.threeunity` | PBR Material Maps | B→R metalness、G→1−A smoothness、per-map ST、tangent/normalScale 与 HDR emission |
 
-九个 Sample 都随 UPM 包提供，可从 Package Manager 的 Samples 页面直接导入。动画 Sample 拖入 Scene 后进入 Play 即可运行，不需要额外 Animator Controller。
+九个 Sample 都随打包后的 UPM 包提供，可从 Package Manager 的 Samples 页面直接导入；源码 checkout 先运行 `npm run samples:generate`。动画 Sample 拖入 Scene 后进入 Play 即可运行，不需要额外 Animator Controller。
 
 ## Web Bridge 运行时
 
@@ -405,6 +414,7 @@ Three Unity Bridge 是场景、运行时与宿主桥，不是 JavaScript → C# 
 | `benchmarks/` | 输入与碰撞 transport 的可复现基准 |
 | `conversion-tools/` | 开源游戏 capture 与实体 Player 故障工具 |
 | `conversion-work/`、`conversions/` | 本地忽略的上游样例、转换产物与验证报告；不进入 Git |
+| `examples/output/`、`unity-package/Samples~/**/*.threeunity` | 由 `npm run samples:generate` 重建的本地/打包载荷；不进入 Git |
 | `docs/` | 性能、协议与架构设计文档 |
 
 ## 开发与验证
@@ -415,7 +425,7 @@ npm test
 dotnet test .\webview-host-tests\ThreeUnityWebHost.Tests.csproj -c Release
 ```
 
-修改 UPM Runtime、Editor 或 importer 时，还需要把 `unity-package` 安装到一次性 Unity 项目并运行 EditMode tests；权威结果是已完成、测试数大于 0 且 failures 为 0 的 XML。修改 Web Bridge 生命周期时再运行对应实体 Player fault harness；只有性能改动才运行 benchmarks。
+修改 UPM Runtime、Editor、importer 或 Sample 时，先运行 `npm run samples:generate`，再把 `unity-package` 安装到一次性 Unity 项目并运行 EditMode tests；权威结果是已完成、测试数大于 0 且 failures 为 0 的 XML。修改 Web Bridge 生命周期时再运行对应实体 Player fault harness；只有性能改动才运行 benchmarks。
 
 ## 进一步阅读
 

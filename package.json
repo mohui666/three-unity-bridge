@@ -33,7 +33,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "prepack": "npm run build",
+    "prepack": "npm run samples:generate",
     "test": "tsc -p tsconfig.tests.json && node --test dist-tests/tests/*.test.js",
     "benchmark:collision": "npm run build && node benchmarks/collision-transport.mjs",
     "benchmark:input": "npm run build && node benchmarks/input-transport.mjs",
@@ -46,6 +46,7 @@
     "example:components": "npm run build && node examples/generate-component-binding.mjs",
     "example:textures": "npm run build && node examples/generate-texture-pipeline.mjs",
     "example:pbr": "npm run build && node examples/generate-pbr-material-maps.mjs",
+    "samples:generate": "npm run build && node examples/generate-samples.mjs",
     "conversions:capture": "node conversion-tools/capture-games.mjs"
   },
   "keywords": [

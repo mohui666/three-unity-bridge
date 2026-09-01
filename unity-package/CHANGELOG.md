@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Stopped tracking generated `.threeunity` payloads in Git; `npm run samples:generate` now rebuilds and synchronizes all package samples, and npm `prepack` includes them in packed releases.
 - Added `.threeunity` format v8 with separate Three.js metalness/roughness maps, per-map texture transforms, mesh tangents, `normalScale`, and `emissiveIntensity` while retaining v1-v7 import compatibility.
 - Added import-time linear Metallic/Smoothness and Scaled Normal subassets, tangent conversion/recalculation, effective emission animation, and PBR map support in the existing Vertex Color and Instanced Surface shaders.
 - Added the deterministic PBR Material Maps sample plus one focused exporter test and one focused Unity importer smoke test for channel packing, tangent/normal behavior, sampler/ST state, emission, animation, and shared identity.

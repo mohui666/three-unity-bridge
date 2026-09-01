@@ -33,6 +33,8 @@ Recordings/
 *.utmp
 
 # Local conversion samples, generated captures, and integration workspaces
+*.threeunity
+/examples/output/
 conversions/
 conversion-work/
 unity-smoke/

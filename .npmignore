@@ -1,0 +1,3 @@
+# Generated example duplicates stay local. `prepack` synchronizes the Unity
+# package sample payloads, which are intentionally included by package.json.
+examples/output/
