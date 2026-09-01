@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added `.threeunity` format v8 with separate Three.js metalness/roughness maps, per-map texture transforms, mesh tangents, `normalScale`, and `emissiveIntensity` while retaining v1-v7 import compatibility.
+- Added import-time linear Metallic/Smoothness and Scaled Normal subassets, tangent conversion/recalculation, effective emission animation, and PBR map support in the existing Vertex Color and Instanced Surface shaders.
+- Added the deterministic PBR Material Maps sample plus one focused exporter test and one focused Unity importer smoke test for channel packing, tangent/normal behavior, sampler/ST state, emission, animation, and shared identity.
 - Added `.threeunity` format v7 `encoded-image` and little-endian `raw` texture import with source color space, row orientation, wrap, filter, mipmap, and anisotropy settings.
 - Added native R/RG/RGB/RGBA uint8, half-float, and float `Texture2D` formats, including lossless RGB half/float expansion to RGBA with alpha one.
 - Added a self-contained Texture Sources and DataTexture sample plus focused importer coverage for encoded orientation, raw values, sampler state, and shared texture identity.

@@ -249,7 +249,7 @@ const document = JSON.parse(json);
 const validation = validateDocument(document);
 if (!validation.valid) throw new Error(`Generated primitive example is invalid: ${validation.errors.join(" ")}`);
 
-assert.equal(document.version, 7);
+assert.equal(document.version, 8);
 assert.deepEqual(
   document.primitives.map((primitive) => primitive.type).sort(),
   ["line", "line-loop", "line-segments", "points", "sprite", "sprite"],

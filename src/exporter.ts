@@ -23,6 +23,7 @@ import {
   NearestMipmapLinearFilter,
   NearestMipmapNearestFilter,
   NoColorSpace,
+  ObjectSpaceNormalMap,
   Object3D,
   Points,
   PropertyBinding,
@@ -36,6 +37,7 @@ import {
   SkinnedMesh,
   Sprite,
   SRGBColorSpace,
+  TangentSpaceNormalMap,
   Texture,
   UnsignedByteType,
   Vector3,
@@ -210,15 +212,59 @@ export async function exportThreeUnity(
     const baseColorTexture = renderMode === "line" ? null : primitiveMaterial.map ?? standard.map;
     const baseColor = readColor((material as Material & { color?: Color }).color, [1, 1, 1]);
     const emissive = renderMode === "surface" ? readColor(standard.emissive, [0, 0, 0]) : [0, 0, 0] as [number, number, number];
-    const baseColorTextureST = readBaseColorTextureST(material, baseColorTexture, warnings);
+    const isPbrMaterial = renderMode === "surface"
+      && (material.type === "MeshStandardMaterial" || material.type === "MeshPhysicalMaterial");
+    const metalnessTexture = isPbrMaterial ? standard.metalnessMap : null;
+    const roughnessTexture = isPbrMaterial ? standard.roughnessMap : null;
+    const normalTexture = renderMode === "surface" ? standard.normalMap : null;
+    const emissiveTexture = renderMode === "surface" ? standard.emissiveMap : null;
+    if (material.type === "MeshPhysicalMaterial") warnUnsupportedPhysicalFeatures(material, warnings);
+    assertPbrDataTextureColorSpace(material, "metalnessMap", metalnessTexture);
+    assertPbrDataTextureColorSpace(material, "roughnessMap", roughnessTexture);
+    assertPbrDataTextureColorSpace(material, "normalMap", normalTexture);
+    warnEmissiveTextureColorSpace(material, emissiveTexture, warnings);
+
+    const baseColorTextureST = readTextureST(material, baseColorTexture, "map", warnings);
+    const metalnessTextureST = readTextureST(material, metalnessTexture, "metalnessMap", warnings);
+    const roughnessTextureST = readTextureST(material, roughnessTexture, "roughnessMap", warnings);
+    const normalTextureST = readTextureST(material, normalTexture, "normalMap", warnings);
+    const emissiveTextureST = readTextureST(material, emissiveTexture, "emissiveMap", warnings);
+    const metallic = readFiniteMaterialNumber(material, "metalness", typeof standard.metalness === "number" ? standard.metalness : 0);
+    const roughness = readFiniteMaterialNumber(material, "roughness", typeof standard.roughness === "number" ? standard.roughness : 0.5);
+    const emissiveIntensity = renderMode === "surface"
+      ? readFiniteMaterialNumber(material, "emissiveIntensity", typeof standard.emissiveIntensity === "number" ? standard.emissiveIntensity : 1)
+      : 1;
+    const normalScale = readNormalScale(material, standard, normalTexture);
+    const normalMapType = readNormalMapType(material, standard, normalTexture);
+
+    const baseColorTextureId = await registerTexture(baseColorTexture);
+    const emissiveTextureId = await registerTexture(emissiveTexture);
+    const normalTextureId = await registerTexture(normalTexture);
+    const metalnessTextureId = await registerTexture(metalnessTexture);
+    const roughnessTextureId = await registerTexture(roughnessTexture);
+    const metalnessRecord = textureRecordById(textures, metalnessTextureId);
+    const roughnessRecord = textureRecordById(textures, roughnessTextureId);
+    const normalRecord = textureRecordById(textures, normalTextureId);
+    assertUint8PbrInput(material, "metalnessMap", metalnessTexture, metalnessRecord, "PBR mask packing");
+    assertUint8PbrInput(material, "roughnessMap", roughnessTexture, roughnessRecord, "PBR mask packing");
+    assertUint8PbrInput(material, "normalMap", normalTexture, normalRecord, "normal map processing");
+    assertMetalnessRoughnessCompatibility(
+      material,
+      metalnessTexture,
+      roughnessTexture,
+      metalnessRecord,
+      roughnessRecord,
+      metalnessTextureST,
+      roughnessTextureST,
+    );
     const converted: ThreeUnityMaterial = {
       id,
       name: material.name || id,
       sourceType: material.type,
       baseColor: [baseColor[0], baseColor[1], baseColor[2], material.opacity],
       emissive,
-      metallic: typeof standard.metalness === "number" ? standard.metalness : 0,
-      roughness: typeof standard.roughness === "number" ? standard.roughness : 0.5,
+      metallic,
+      roughness,
       opacity: material.opacity,
       transparent: material.transparent,
       // Unity v1 has no back-side-only mode; two-sided is the closest safe
@@ -227,11 +273,20 @@ export async function exportThreeUnity(
       alphaCutoff: material.alphaTest,
       unlit: renderMode !== "surface" || material.type === "MeshBasicMaterial" || Boolean((material as Material & { isMeshBasicMaterial?: boolean }).isMeshBasicMaterial),
       vertexColors: Boolean((material as Material & { vertexColors?: boolean }).vertexColors),
-      baseColorTextureId: await registerTexture(baseColorTexture),
+      baseColorTextureId,
       baseColorTextureST,
-      emissiveTextureId: renderMode === "surface" ? await registerTexture(standard.emissiveMap) : "",
-      normalTextureId: renderMode === "surface" ? await registerTexture(standard.normalMap) : "",
-      metallicRoughnessTextureId: renderMode === "surface" ? await registerTexture(standard.metalnessMap || standard.roughnessMap) : "",
+      emissiveTextureId,
+      emissiveTextureST,
+      normalTextureId,
+      normalTextureST,
+      normalMapType,
+      normalScale,
+      emissiveIntensity,
+      metalnessTextureId,
+      roughnessTextureId,
+      metalnessTextureST,
+      roughnessTextureST,
+      metallicRoughnessTextureId: metalnessTexture && metalnessTexture === roughnessTexture ? metalnessTextureId : "",
       renderMode,
       pointSize,
       sizeAttenuation: renderMode === "points" || renderMode === "sprite" ? primitiveMaterial.sizeAttenuation ?? true : true,
@@ -262,6 +317,7 @@ export async function exportThreeUnity(
     const normal = geometry.getAttribute("normal") as BufferAttribute | undefined;
     const uv = geometry.getAttribute("uv") as BufferAttribute | undefined;
     const color = geometry.getAttribute("color") as BufferAttribute | undefined;
+    const tangent = geometry.getAttribute("tangent") as BufferAttribute | undefined;
     const morphTargets = exportMorphTargets(mesh, position, normal, positionMorphAttributes, normalMorphAttributes, morphTargetNames);
     const skinAttributes = isSkinnedMesh ? normalizeSkinAttributes(skinnedMesh, position) : { skinIndices: [], skinWeights: [] };
     meshes.push({
@@ -271,6 +327,7 @@ export async function exportThreeUnity(
       normals: normal ? attributeToArray(normal) : [],
       uv0: uv ? attributeToArray(uv) : [],
       colors: color ? attributeToArray(color, 4, 1) : [],
+      tangents: tangent ? exportTangents(mesh, tangent, position.count) : [],
       indices: geometry.index ? Array.from(geometry.index.array, Number) : [],
       groups: geometry.groups.map((group) => ({
         start: group.start,
@@ -556,6 +613,8 @@ interface SampledMaterialState {
   materialMetallic: [number];
   materialRoughness: [number];
   materialBaseMapST: [number, number, number, number];
+  sourceEmissive: [number, number, number];
+  sourceEmissiveIntensity: number;
 }
 
 type SampledMaterialChannels = Record<ThreeUnityMaterialAnimationProperty, number[]>;
@@ -647,7 +706,15 @@ function exportAnimations(
           warnGpuInstancedMaterialTrack(target as Object3D, parsed, clip, track.name, warnings);
           return false;
         }
-        if (!target || !validateMaterialSourceTrackTarget(target as Object3D, parsed, clip, track.name, exportedMaterialObjectSet, warnings)) return false;
+        if (!target || !validateMaterialSourceTrackTarget(
+          target as Object3D,
+          parsed,
+          clip,
+          track.name,
+          track.values,
+          exportedMaterialObjectSet,
+          warnings,
+        )) return false;
         samplesMaterials = true;
       }
       return true;
@@ -929,6 +996,7 @@ function isSupportedMaterialSourceProperty(objectName: string | undefined, prope
     && (propertyName === "color"
       || propertyName === "opacity"
       || propertyName === "emissive"
+      || propertyName === "emissiveIntensity"
       || propertyName === "metalness"
       || propertyName === "roughness");
 }
@@ -956,6 +1024,7 @@ function validateMaterialSourceTrackTarget(
   parsed: ReturnType<typeof PropertyBinding.parseTrackName>,
   clip: AnimationClip,
   trackName: string,
+  trackValues: ArrayLike<number>,
   exportedMaterialObjects: Set<Object3D>,
   warnings: string[],
 ): boolean {
@@ -1004,7 +1073,13 @@ function validateMaterialSourceTrackTarget(
 
   const standard = material as MeshStandardMaterial;
   const renderMode = materialRenderMode(material);
-  if (renderMode !== "surface" && (parsed.propertyName === "emissive" || parsed.propertyName === "metalness" || parsed.propertyName === "roughness")) {
+  if (
+    renderMode !== "surface"
+    && (parsed.propertyName === "emissive"
+      || parsed.propertyName === "emissiveIntensity"
+      || parsed.propertyName === "metalness"
+      || parsed.propertyName === "roughness")
+  ) {
     warnings.push(`${label} targets unsupported ${material.type} property '${parsed.propertyName}'.`);
     return false;
   }
@@ -1014,12 +1089,27 @@ function validateMaterialSourceTrackTarget(
       ? typeof material.opacity === "number"
       : parsed.propertyName === "emissive"
         ? Boolean(standard.emissive)
+        : parsed.propertyName === "emissiveIntensity"
+          ? typeof standard.emissiveIntensity === "number"
         : parsed.propertyName === "metalness"
           ? typeof standard.metalness === "number"
           : typeof standard.roughness === "number";
   if (!supported) {
     warnings.push(`${label} targets property '${parsed.propertyName}' that material '${material.name || material.uuid}' does not expose.`);
     return false;
+  }
+  if (
+    (parsed.propertyName === "metalness" || parsed.propertyName === "roughness")
+    && (standard.metalnessMap || standard.roughnessMap)
+  ) {
+    const initialValue = standard[parsed.propertyName];
+    const changes = Array.from(trackValues).some((value) => Math.abs(value - initialValue) > 1e-7);
+    if (changes) {
+      const materialIndex = Array.isArray(materialValue) ? Number(parsed.objectIndex) : 0;
+      throw new Error(
+        `Animation '${clip.name || clip.uuid}' track '${trackName}' targets node '${target.name || target.uuid}', source material index ${materialIndex}, material '${material.name || material.uuid}', property '${parsed.propertyName}'. Format v8 packs static metallic/roughness values into a Unity Metallic/Smoothness texture. Animate a map-free material or remove that track.`,
+      );
+    }
   }
   return true;
 }
@@ -1038,6 +1128,7 @@ function readSampledMaterialState(slot: ExportedMaterialSlot, clip: AnimationCli
   const material = slot.material as Material & {
     color?: Color;
     emissive?: Color;
+    emissiveIntensity?: number;
     metalness?: number;
     roughness?: number;
     map?: Texture | null;
@@ -1051,6 +1142,12 @@ function readSampledMaterialState(slot: ExportedMaterialSlot, clip: AnimationCli
   };
   const color = material.color;
   const emissive = material.emissive;
+  const emissiveIntensity = read(material.emissiveIntensity ?? 1, "emissiveIntensity");
+  const sourceEmissive: [number, number, number] = [
+    read(emissive?.r ?? 0, "emissive.r"),
+    read(emissive?.g ?? 0, "emissive.g"),
+    read(emissive?.b ?? 0, "emissive.b"),
+  ];
   const map = material.map;
   return {
     materialBaseColor: [
@@ -1060,9 +1157,9 @@ function readSampledMaterialState(slot: ExportedMaterialSlot, clip: AnimationCli
       read(material.opacity, "opacity"),
     ],
     materialEmissive: [
-      read(emissive?.r ?? 0, "emissive.r"),
-      read(emissive?.g ?? 0, "emissive.g"),
-      read(emissive?.b ?? 0, "emissive.b"),
+      read(sourceEmissive[0] * emissiveIntensity, "emissive.r * emissiveIntensity"),
+      read(sourceEmissive[1] * emissiveIntensity, "emissive.g * emissiveIntensity"),
+      read(sourceEmissive[2] * emissiveIntensity, "emissive.b * emissiveIntensity"),
     ],
     materialMetallic: [read(material.metalness ?? 0, "metalness")],
     materialRoughness: [read(material.roughness ?? 0.5, "roughness")],
@@ -1072,6 +1169,8 @@ function readSampledMaterialState(slot: ExportedMaterialSlot, clip: AnimationCli
       read(map?.offset.x ?? 0, "map.offset.x"),
       read(map?.offset.y ?? 0, "map.offset.y"),
     ],
+    sourceEmissive,
+    sourceEmissiveIntensity: emissiveIntensity,
   };
 }
 
@@ -1079,13 +1178,15 @@ function restoreSampledMaterialState(materialValue: Material, state: SampledMate
   const material = materialValue as Material & {
     color?: Color;
     emissive?: Color;
+    emissiveIntensity?: number;
     metalness?: number;
     roughness?: number;
     map?: Texture | null;
   };
   material.color?.setRGB(state.materialBaseColor[0], state.materialBaseColor[1], state.materialBaseColor[2]);
   material.opacity = state.materialBaseColor[3];
-  material.emissive?.setRGB(...state.materialEmissive);
+  material.emissive?.setRGB(...state.sourceEmissive);
+  if (typeof material.emissiveIntensity === "number") material.emissiveIntensity = state.sourceEmissiveIntensity;
   if (typeof material.metalness === "number") material.metalness = state.materialMetallic[0];
   if (typeof material.roughness === "number") material.roughness = state.materialRoughness[0];
   material.map?.repeat.set(state.materialBaseMapST[0], state.materialBaseMapST[1]);
@@ -1592,6 +1693,15 @@ function primitiveColorsToArray(attribute: BufferAttribute, object: Line | Point
   return attributeToArray(attribute, 4, 1, `${object.name || object.uuid} color`);
 }
 
+function exportTangents(mesh: Mesh, attribute: BufferAttribute, vertexCount: number): number[] {
+  const label = `Mesh '${mesh.name || mesh.uuid}' tangent`;
+  if (attribute.itemSize < 4) throw new Error(`${label} attribute must have itemSize at least 4, received ${attribute.itemSize}.`);
+  if (attribute.count !== vertexCount) {
+    throw new Error(`${label} count ${attribute.count} does not match position count ${vertexCount}.`);
+  }
+  return attributeToArray(attribute, 4, 0, label);
+}
+
 function hasMorphAttributes(geometry: BufferGeometry): boolean {
   return Object.values(geometry.morphAttributes).some((attributes) => Array.isArray(attributes) && attributes.length > 0);
 }
@@ -1661,9 +1771,153 @@ function exportTextureColorSpace(texture: Texture): ThreeUnityTextureColorSpace 
   );
 }
 
-function readBaseColorTextureST(material: Material, texture: Texture | null, warnings: string[]): [number, number, number, number] {
+function readFiniteMaterialNumber(material: Material, property: string, value: number): number {
+  if (!Number.isFinite(value)) {
+    throw new Error(`Material '${material.name || material.uuid}' property '${property}' must be finite, received '${value}'.`);
+  }
+  return value;
+}
+
+function readNormalScale(
+  material: Material,
+  standard: MeshStandardMaterial,
+  normalTexture: Texture | null | undefined,
+): [number, number] {
+  if (!normalTexture) return [1, 1];
+  const x = standard.normalScale?.x ?? 1;
+  const y = standard.normalScale?.y ?? 1;
+  return [
+    readFiniteMaterialNumber(material, "normalScale.x", x),
+    readFiniteMaterialNumber(material, "normalScale.y", y),
+  ];
+}
+
+function readNormalMapType(
+  material: Material,
+  standard: MeshStandardMaterial,
+  normalTexture: Texture | null | undefined,
+): ThreeUnityMaterial["normalMapType"] {
+  if (!normalTexture) return "none";
+  if (standard.normalMapType === ObjectSpaceNormalMap) {
+    throw new Error(`Material '${material.name || material.uuid}' uses ObjectSpaceNormalMap, which format v8 does not support.`);
+  }
+  if (standard.normalMapType !== TangentSpaceNormalMap) {
+    throw new Error(
+      `Material '${material.name || material.uuid}' normalMap has unsupported normalMapType '${String(standard.normalMapType)}'; only TangentSpaceNormalMap is supported.`,
+    );
+  }
+  return "tangent-space";
+}
+
+function assertPbrDataTextureColorSpace(
+  material: Material,
+  slotName: "metalnessMap" | "roughnessMap" | "normalMap",
+  texture: Texture | null | undefined,
+): void {
+  if (!texture) return;
+  if (texture.colorSpace === NoColorSpace || texture.colorSpace === "" || texture.colorSpace === LinearSRGBColorSpace) return;
+  throw new Error(
+    `Material '${material.name || material.uuid}' slot '${slotName}' texture '${texture.name || texture.uuid}' has colorSpace '${String(texture.colorSpace)}'; format v8 PBR data textures must use NoColorSpace or LinearSRGBColorSpace, not SRGBColorSpace.`,
+  );
+}
+
+function warnEmissiveTextureColorSpace(
+  material: Material,
+  texture: Texture | null | undefined,
+  warnings: string[],
+): void {
+  if (!texture || texture.colorSpace === SRGBColorSpace) return;
+  warnings.push(
+    `Material '${material.name || material.uuid}' slot 'emissiveMap' texture '${texture.name || texture.uuid}' has colorSpace '${String(texture.colorSpace)}'; emissiveMap is color data and should use SRGBColorSpace.`,
+  );
+}
+
+function warnUnsupportedPhysicalFeatures(material: Material, warnings: string[]): void {
+  const physical = material as Material & {
+    anisotropy?: number;
+    anisotropyMap?: Texture | null;
+    clearcoat?: number;
+    clearcoatMap?: Texture | null;
+    clearcoatNormalMap?: Texture | null;
+    clearcoatRoughness?: number;
+    clearcoatRoughnessMap?: Texture | null;
+    iridescence?: number;
+    iridescenceMap?: Texture | null;
+    sheen?: number;
+    sheenColorMap?: Texture | null;
+    sheenRoughnessMap?: Texture | null;
+    thickness?: number;
+    thicknessMap?: Texture | null;
+    transmission?: number;
+    transmissionMap?: Texture | null;
+  };
+  const unsupported = [
+    physical.clearcoat !== 0 || physical.clearcoatRoughness !== 0 || physical.clearcoatMap || physical.clearcoatNormalMap || physical.clearcoatRoughnessMap ? "clearcoat" : "",
+    physical.transmission !== 0 || physical.thickness !== 0 || physical.transmissionMap || physical.thicknessMap ? "transmission/thickness" : "",
+    physical.sheen !== 0 || physical.sheenColorMap || physical.sheenRoughnessMap ? "sheen" : "",
+    physical.iridescence !== 0 || physical.iridescenceMap ? "iridescence" : "",
+    physical.anisotropy !== 0 || physical.anisotropyMap ? "anisotropy" : "",
+  ].filter(Boolean);
+  if (unsupported.length > 0) {
+    warnings.push(
+      `Material '${material.name || material.uuid}' MeshPhysicalMaterial features ${unsupported.join(", ")} are not converted; only inherited MeshStandardMaterial fields are exported.`,
+    );
+  }
+}
+
+function textureRecordById(textures: ThreeUnityTexture[], textureId: string): ThreeUnityTexture | undefined {
+  return textureId ? textures.find((texture) => texture.id === textureId) : undefined;
+}
+
+function assertUint8PbrInput(
+  material: Material,
+  slotName: "metalnessMap" | "roughnessMap" | "normalMap",
+  source: Texture | null | undefined,
+  record: ThreeUnityTexture | undefined,
+  operation: "PBR mask packing" | "normal map processing",
+): void {
+  if (!source || !record || record.encoding !== "raw" || record.componentType === "uint8") return;
+  throw new Error(
+    `Material '${material.name || material.uuid}' slot '${slotName}' texture '${source.name || source.uuid}': format v8 ${operation} currently accepts encoded or uint8 textures only; float ${operation} is not implemented.`,
+  );
+}
+
+function assertMetalnessRoughnessCompatibility(
+  material: Material,
+  metalnessTexture: Texture | null | undefined,
+  roughnessTexture: Texture | null | undefined,
+  metalnessRecord: ThreeUnityTexture | undefined,
+  roughnessRecord: ThreeUnityTexture | undefined,
+  metalnessTextureST: [number, number, number, number],
+  roughnessTextureST: [number, number, number, number],
+): void {
+  if (!metalnessTexture || !roughnessTexture || !metalnessRecord || !roughnessRecord) return;
+  const comparisons: Array<[string, unknown, unknown]> = [
+    ["width", metalnessRecord.width, roughnessRecord.width],
+    ["height", metalnessRecord.height, roughnessRecord.height],
+    ["texture ST", metalnessTextureST, roughnessTextureST],
+    ["wrapS", metalnessRecord.wrapS, roughnessRecord.wrapS],
+    ["wrapT", metalnessRecord.wrapT, roughnessRecord.wrapT],
+    ["filterMode", metalnessRecord.filterMode, roughnessRecord.filterMode],
+    ["mipmaps", metalnessRecord.mipmaps, roughnessRecord.mipmaps],
+    ["anisotropy", metalnessRecord.anisotropy, roughnessRecord.anisotropy],
+  ];
+  for (const [field, metalnessValue, roughnessValue] of comparisons) {
+    if (JSON.stringify(metalnessValue) === JSON.stringify(roughnessValue)) continue;
+    throw new Error(
+      `Material '${material.name || material.uuid}' metalnessMap texture '${metalnessTexture.name || metalnessTexture.uuid}' and roughnessMap texture '${roughnessTexture.name || roughnessTexture.uuid}' differ in ${field} (${JSON.stringify(metalnessValue)} versus ${JSON.stringify(roughnessValue)}). Format v8 requires metalnessMap and roughnessMap to use the same dimensions and sampling transform because Unity Metallic/Smoothness uses one packed texture.`,
+    );
+  }
+}
+
+function readTextureST(
+  material: Material,
+  texture: Texture | null | undefined,
+  slotName: string,
+  warnings: string[],
+): [number, number, number, number] {
   if (!texture) return [1, 1, 0, 0];
-  const label = `Material '${material.name || material.uuid}' base color texture '${texture.name || texture.uuid}'`;
+  const label = `Material '${material.name || material.uuid}' slot '${slotName}' texture '${texture.name || texture.uuid}'`;
   const values: [number, number, number, number] = [texture.repeat.x, texture.repeat.y, texture.offset.x, texture.offset.y];
   for (const [index, value] of values.entries()) {
     if (!Number.isFinite(value)) throw new Error(`${label} ST component ${index} must be finite, received '${value}'.`);

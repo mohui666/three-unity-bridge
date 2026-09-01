@@ -45,6 +45,7 @@
     "example:primitives": "npm run build && node examples/generate-primitives.mjs",
     "example:components": "npm run build && node examples/generate-component-binding.mjs",
     "example:textures": "npm run build && node examples/generate-texture-pipeline.mjs",
+    "example:pbr": "npm run build && node examples/generate-pbr-material-maps.mjs",
     "conversions:capture": "node conversion-tools/capture-games.mjs"
   },
   "keywords": [

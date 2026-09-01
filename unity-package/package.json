@@ -53,6 +53,11 @@
       "displayName": "Texture Sources and DataTexture",
       "description": "Imports self-contained local and HTTP PNG/JPEG sources plus uint8, half-float, and float DataTextures with source sampler and color-space settings.",
       "path": "Samples~/Texture Sources and DataTexture"
+    },
+    {
+      "displayName": "PBR Material Maps",
+      "description": "Imports Three.js metalness, roughness, tangent-space normal, and emissive maps with per-map transforms and derived Unity PBR textures.",
+      "path": "Samples~/PBR Material Maps"
     }
   ]
 }

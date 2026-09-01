@@ -24,6 +24,7 @@ import {
   LineBasicMaterial,
   LinearFilter,
   LinearMipmapLinearFilter,
+  LinearSRGBColorSpace,
   LineLoop,
   LineSegments,
   Matrix4,
@@ -32,6 +33,7 @@ import {
   MeshStandardMaterial,
   MirroredRepeatWrapping,
   NumberKeyframeTrack,
+  NoColorSpace,
   PerspectiveCamera,
   Points,
   PointsMaterial,
@@ -92,7 +94,7 @@ test("exports a scene hierarchy, geometry, material, camera and light", async ()
   assert.equal(document.meshes.length, 1);
   assert.equal(document.materials.length, 1);
   assert.equal(document.textures.length, 1);
-  assert.equal(document.version, 7);
+  assert.equal(document.version, 8);
   assert.equal(document.textures[0].encoding, "raw");
   assert.equal(document.textures[0].mimeType, "");
   assert.equal(document.textures[0].pixelFormat, "rgba");
@@ -229,7 +231,7 @@ test("exports one self-contained v7 pipeline for local/HTTP images and the raw D
       },
     });
 
-    assert.equal(document.version, 7);
+    assert.equal(document.version, 8);
     assert.deepEqual(validateDocument(document), { valid: true, errors: [] });
     assert.equal(resolutionCounts.get("./local.png"), 1);
     assert.equal(resolutionCounts.get(httpUri), 1);
@@ -329,6 +331,254 @@ test("exports one self-contained v7 pipeline for local/HTTP images and the raw D
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("exports one format-v8 PBR material-map contract without mutating source state", async () => {
+  const makeTexture = (name: string, values: number[], colorSpace: Texture["colorSpace"] = NoColorSpace): DataTexture => {
+    const texture = new DataTexture(new Uint8Array(values), 2, 2, RGBAFormat, UnsignedByteType);
+    texture.name = name;
+    texture.colorSpace = colorSpace;
+    texture.wrapS = RepeatWrapping;
+    texture.wrapT = MirroredRepeatWrapping;
+    texture.magFilter = LinearFilter;
+    texture.minFilter = LinearFilter;
+    texture.generateMipmaps = false;
+    texture.anisotropy = 2;
+    return texture;
+  };
+  const pixels = [
+    16, 32, 48, 255,
+    64, 80, 96, 255,
+    112, 128, 144, 255,
+    160, 176, 192, 255,
+  ];
+  const sharedMask = makeTexture("Shared Metalness Roughness", pixels);
+  sharedMask.repeat.set(2, 3);
+  sharedMask.offset.set(0.125, 0.25);
+  const separateMetalness = makeTexture("Separate Metalness", pixels, LinearSRGBColorSpace);
+  const separateRoughness = makeTexture("Separate Roughness", pixels);
+  separateMetalness.repeat.set(1.25, 0.75);
+  separateRoughness.repeat.copy(separateMetalness.repeat);
+  separateMetalness.offset.set(0.05, 0.15);
+  separateRoughness.offset.copy(separateMetalness.offset);
+  const normalMap = makeTexture("Tangent Normal", [
+    128, 128, 255, 255,
+    192, 128, 238, 255,
+    64, 192, 220, 255,
+    128, 64, 246, 255,
+  ]);
+  normalMap.repeat.set(0.5, 1.5);
+  normalMap.offset.set(0.2, 0.3);
+  const emissiveMap = makeTexture("Emission Color", pixels, SRGBColorSpace);
+  emissiveMap.repeat.set(3, 2);
+  emissiveMap.offset.set(0.4, 0.1);
+
+  const sharedMaterial = new MeshStandardMaterial({
+    metalness: 0.7,
+    roughness: 0.4,
+    metalnessMap: sharedMask,
+    roughnessMap: sharedMask,
+    normalMap,
+    emissiveMap,
+  });
+  sharedMaterial.name = "Shared PBR Material";
+  sharedMaterial.normalScale.set(-0.5, 1.25);
+  sharedMaterial.emissive.setRGB(0.25, 0.5, 0.75);
+  sharedMaterial.emissiveIntensity = 2.5;
+  const separateMaterial = new MeshStandardMaterial({
+    metalness: 0.3,
+    roughness: 0.8,
+    metalnessMap: separateMetalness,
+    roughnessMap: separateRoughness,
+  });
+  separateMaterial.name = "Separate PBR Material";
+
+  const tangentValues = [
+    1, 0, 0, 1,
+    1, 0, 0, -1,
+    0, 1, 0, 1,
+  ];
+  const geometry = new BufferGeometry();
+  geometry.setAttribute("position", new Float32BufferAttribute([
+    -0.5, 0, 0,
+    0.5, 0, 0,
+    0, 1, 0,
+  ], 3));
+  geometry.setAttribute("normal", new Float32BufferAttribute([
+    0, 0, 1,
+    0, 0, 1,
+    0, 0, 1,
+  ], 3));
+  geometry.setAttribute("uv", new Float32BufferAttribute([0, 0, 1, 0, 0.5, 1], 2));
+  geometry.setAttribute("tangent", new Float32BufferAttribute(tangentValues, 4));
+  geometry.setIndex([0, 1, 2]);
+  const sharedMesh = new Mesh(geometry, sharedMaterial);
+  sharedMesh.name = "Shared PBR Mesh";
+  const separateMesh = new Mesh(geometry, separateMaterial);
+  separateMesh.name = "Separate PBR Mesh";
+  separateMesh.position.x = 2;
+  const scene = new Scene();
+  scene.add(sharedMesh, separateMesh);
+  scene.animations.push(new AnimationClip("Emission Intensity Pulse", 1, [
+    new NumberKeyframeTrack(`${sharedMesh.uuid}.material.emissiveIntensity`, [0, 1], [2.5, 4.5]),
+  ]));
+
+  const sourceTextures = [sharedMask, separateMetalness, separateRoughness, normalMap, emissiveMap];
+  const original = {
+    emissive: sharedMaterial.emissive.toArray(),
+    emissiveIntensity: sharedMaterial.emissiveIntensity,
+    metalness: sharedMaterial.metalness,
+    roughness: sharedMaterial.roughness,
+    tangent: Array.from((geometry.getAttribute("tangent") as Float32BufferAttribute).array),
+    textures: sourceTextures.map((texture) => ({
+      bytes: Array.from(texture.image.data),
+      offset: texture.offset.toArray(),
+      repeat: texture.repeat.toArray(),
+      colorSpace: texture.colorSpace,
+    })),
+  };
+
+  const document = await exportThreeUnity(scene, { animationSampleRate: 1 });
+  assert.equal(document.version, 8);
+  assert.deepEqual(validateDocument(document), { valid: true, errors: [] });
+
+  const exportedShared = document.materials.find((material) => material.name === sharedMaterial.name);
+  const exportedSeparate = document.materials.find((material) => material.name === separateMaterial.name);
+  assert.ok(exportedShared && exportedSeparate);
+  assert.equal(exportedShared.metalnessTextureId, exportedShared.roughnessTextureId);
+  assert.equal(exportedShared.metallicRoughnessTextureId, exportedShared.metalnessTextureId);
+  assert.notEqual(exportedSeparate.metalnessTextureId, exportedSeparate.roughnessTextureId);
+  assert.equal(exportedSeparate.metallicRoughnessTextureId, "");
+  assert.deepEqual(exportedShared.metalnessTextureST, [2, 3, 0.125, 0.25]);
+  assert.deepEqual(exportedShared.roughnessTextureST, [2, 3, 0.125, 0.25]);
+  assert.deepEqual(exportedSeparate.metalnessTextureST, [1.25, 0.75, 0.05, 0.15]);
+  assert.deepEqual(exportedSeparate.roughnessTextureST, [1.25, 0.75, 0.05, 0.15]);
+  assert.deepEqual(exportedShared.normalTextureST, [0.5, 1.5, 0.2, 0.3]);
+  assert.deepEqual(exportedShared.emissiveTextureST, [3, 2, 0.4, 0.1]);
+  assert.deepEqual(exportedShared.normalScale, [-0.5, 1.25]);
+  assert.equal(exportedShared.normalMapType, "tangent-space");
+  assert.equal(exportedShared.emissiveIntensity, 2.5);
+  assert.equal(exportedShared.metallic, 0.7);
+  assert.equal(exportedShared.roughness, 0.4);
+  assert.ok(exportedShared.normalTextureId);
+  assert.ok(exportedShared.emissiveTextureId);
+
+  const sharedNode = document.nodes.find((node) => node.name === sharedMesh.name);
+  assert.ok(sharedNode);
+  const exportedMesh = document.meshes.find((mesh) => mesh.id === sharedNode.meshId);
+  assert.ok(exportedMesh);
+  assert.equal(exportedMesh.tangents.length, exportedMesh.positions.length / 3 * 4);
+  assert.deepEqual(exportedMesh.tangents, tangentValues);
+  assert.deepEqual(Array.from((geometry.getAttribute("tangent") as Float32BufferAttribute).array), original.tangent);
+
+  const emissionTrack = document.animations[0].tracks.find((track) =>
+    track.targetNodeId === sharedNode.id && track.property === "materialEmissive"
+  );
+  assert.ok(emissionTrack);
+  assert.deepEqual(emissionTrack.times, [0, 1]);
+  assert.deepEqual(emissionTrack.values, [0.625, 1.25, 1.875, 1.125, 2.25, 3.375]);
+
+  assert.deepEqual(sharedMaterial.emissive.toArray(), original.emissive);
+  assert.equal(sharedMaterial.emissiveIntensity, original.emissiveIntensity);
+  assert.equal(sharedMaterial.metalness, original.metalness);
+  assert.equal(sharedMaterial.roughness, original.roughness);
+  for (const [index, texture] of sourceTextures.entries()) {
+    assert.deepEqual(Array.from(texture.image.data), original.textures[index].bytes);
+    assert.deepEqual(texture.offset.toArray(), original.textures[index].offset);
+    assert.deepEqual(texture.repeat.toArray(), original.textures[index].repeat);
+    assert.equal(texture.colorSpace, original.textures[index].colorSpace);
+  }
+
+  for (let version = 1; version <= 7; version += 1) {
+    const legacy = structuredClone(document) as unknown as Record<string, unknown> & {
+      animations: unknown[];
+      materials: Array<Record<string, unknown>>;
+      meshes: Array<Record<string, unknown>>;
+    };
+    legacy.version = version;
+    for (const mesh of legacy.meshes) delete mesh.tangents;
+    for (const material of legacy.materials) {
+      for (const field of [
+        "metalnessTextureId",
+        "roughnessTextureId",
+        "metalnessTextureST",
+        "roughnessTextureST",
+        "normalTextureST",
+        "emissiveTextureST",
+        "normalMapType",
+        "normalScale",
+        "emissiveIntensity",
+      ]) delete material[field];
+    }
+    if (version < 4) {
+      legacy.animations = [];
+      legacy.defaultAnimationId = "";
+      legacy.autoplayAnimation = false;
+    }
+    assert.deepEqual(validateDocument(legacy), { valid: true, errors: [] }, `format v${version} compatibility`);
+  }
+
+  const incompatibleDocument = structuredClone(document);
+  const malformedSeparate = incompatibleDocument.materials.find((material) => material.name === separateMaterial.name);
+  assert.ok(malformedSeparate);
+  malformedSeparate.roughnessTextureST[0] += 0.25;
+  const incompatibleValidation = validateDocument(incompatibleDocument);
+  assert.equal(incompatibleValidation.errors.length, 1);
+  assert.match(incompatibleValidation.errors[0], /incompatible texture ST.*same dimensions and sampling transform/);
+
+  const invalidColorDocument = structuredClone(document);
+  const invalidColorMaterial = invalidColorDocument.materials.find((material) => material.name === separateMaterial.name);
+  assert.ok(invalidColorMaterial);
+  const invalidColorTexture = invalidColorDocument.textures.find((texture) => texture.id === invalidColorMaterial.metalnessTextureId);
+  assert.ok(invalidColorTexture);
+  invalidColorTexture.colorSpace = "srgb";
+  const invalidColorValidation = validateDocument(invalidColorDocument);
+  assert.equal(invalidColorValidation.errors.length, 1);
+  assert.match(invalidColorValidation.errors[0], /metalnessTextureId.*non-color texture.*none or linear/);
+
+  const mismatchedMetalness = makeTexture("Mismatched Metalness", pixels);
+  const mismatchedRoughness = makeTexture("Mismatched Roughness", pixels);
+  mismatchedRoughness.repeat.set(2, 1);
+  const mismatchedMaterial = new MeshStandardMaterial({
+    metalnessMap: mismatchedMetalness,
+    roughnessMap: mismatchedRoughness,
+  });
+  mismatchedMaterial.name = "Mismatched PBR Material";
+  const mismatchedScene = new Scene();
+  mismatchedScene.add(new Mesh(geometry, mismatchedMaterial));
+  await assert.rejects(
+    exportThreeUnity(mismatchedScene),
+    /Mismatched PBR Material.*differ in texture ST.*same dimensions and sampling transform.*one packed texture/,
+  );
+
+  const srgbMask = makeTexture("Invalid sRGB Mask", pixels, SRGBColorSpace);
+  const srgbMaterial = new MeshStandardMaterial({ metalnessMap: srgbMask });
+  srgbMaterial.name = "Invalid Data Color Space";
+  const srgbScene = new Scene();
+  srgbScene.add(new Mesh(geometry, srgbMaterial));
+  await assert.rejects(
+    exportThreeUnity(srgbScene),
+    /Invalid Data Color Space.*metalnessMap.*Invalid sRGB Mask.*colorSpace 'srgb'.*NoColorSpace or LinearSRGBColorSpace/,
+  );
+
+  const mappedAnimatedMaterial = new MeshStandardMaterial({
+    metalness: 0.2,
+    metalnessMap: sharedMask,
+    roughnessMap: sharedMask,
+  });
+  mappedAnimatedMaterial.name = "Mapped Animated Material";
+  const mappedAnimatedMesh = new Mesh(geometry, mappedAnimatedMaterial);
+  mappedAnimatedMesh.name = "Mapped Animated Mesh";
+  const mappedAnimatedScene = new Scene();
+  mappedAnimatedScene.add(mappedAnimatedMesh);
+  const mappedClip = new AnimationClip("Mapped Metallic Pulse", 1, [
+    new NumberKeyframeTrack(`${mappedAnimatedMesh.uuid}.material.metalness`, [0, 1], [0.2, 0.9]),
+  ]);
+  await assert.rejects(
+    exportThreeUnity(mappedAnimatedScene, { animations: [mappedClip] }),
+    /Mapped Metallic Pulse.*Mapped Animated Mesh.*source material index 0.*Mapped Animated Material.*property 'metalness'.*packs static metallic\/roughness.*map-free material/,
+  );
+  assert.equal(mappedAnimatedMaterial.metalness, 0.2);
 });
 
 test("deduplicates shared geometry and material", async () => {
@@ -489,7 +739,7 @@ test("exports Line, LineSegments, LineLoop, Points, and Sprite as format v5 prim
 
   const document = await exportThreeUnity(scene, { animationSampleRate: 2 });
   assert.deepEqual(validateDocument(document), { valid: true, errors: [] });
-  assert.equal(document.version, 7);
+  assert.equal(document.version, 8);
   assert.equal(document.primitives.length, 5);
 
   const primitiveFor = (object: Line | LineSegments | LineLoop | Points | Sprite) => {
@@ -722,7 +972,7 @@ test("exports a two-bone SkinnedMesh and baked AnimationClip with stable node re
   });
 
   assert.deepEqual(validateDocument(document), { valid: true, errors: [] });
-  assert.equal(document.version, 7);
+  assert.equal(document.version, 8);
   assert.equal(document.skins.length, 1);
   assert.equal(document.animations.length, 1);
   assert.equal(document.autoplayAnimation, true);
@@ -852,7 +1102,7 @@ test("exports absolute and relative morph targets, initial weights, and baked mo
   const document = await exportThreeUnity(scene, { animationSampleRate: 4 });
 
   assert.deepEqual(validateDocument(document), { valid: true, errors: [] });
-  assert.equal(document.version, 7);
+  assert.equal(document.version, 8);
   assert.strictEqual(absoluteMesh.morphTargetInfluences, originalInfluenceReference);
   assert.deepEqual(absoluteMesh.morphTargetInfluences, originalInfluences);
   assert.deepEqual(absoluteMesh.position.toArray(), originalPosition);
@@ -995,7 +1245,7 @@ test("exports v4 static UV state and shared material animation without mutating 
   const document = await exportThreeUnity(scene, { animationSampleRate: 2 });
 
   assert.deepEqual(validateDocument(document), { valid: true, errors: [] });
-  assert.equal(document.version, 7);
+  assert.equal(document.version, 8);
   assert.equal(document.textures[0].wrapS, "repeat");
   assert.equal(document.textures[0].wrapT, "mirror");
   const exportedSharedMaterial = document.materials.find((material) => material.name === sharedMaterial.name);
@@ -1115,7 +1365,7 @@ test("exports native GPU InstancedMesh records with full matrices and colors whi
 
   const document = await exportThreeUnity(scene, { animationSampleRate: 2 });
   assert.deepEqual(validateDocument(document), { valid: true, errors: [] });
-  assert.equal(document.version, 7);
+  assert.equal(document.version, 8);
   assert.equal(document.meshes.length, 1);
   assert.equal(document.instancedMeshes.length, 1);
   assert.equal(document.nodes.length, 2);

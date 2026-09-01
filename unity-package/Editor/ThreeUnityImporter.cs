@@ -8,7 +8,7 @@ using UnityEngine.Rendering;
 
 namespace ThreeUnity.Bridge.Editor
 {
-    [ScriptedImporter(11, "threeunity")]
+    [ScriptedImporter(12, "threeunity")]
     public sealed class ThreeUnityImporter : ScriptedImporter
     {
         [SerializeField] private bool importCameras = true;
@@ -28,9 +28,9 @@ namespace ThreeUnity.Bridge.Editor
                 return;
             }
 
-            if (document == null || document.format != "three-unity-scene" || document.version < 1 || document.version > 7)
+            if (document == null || document.format != "three-unity-scene" || document.version < 1 || document.version > 8)
             {
-                context.LogImportError("Unsupported document. Expected three-unity-scene format version 1, 2, 3, 4, 5, 6, or 7.");
+                context.LogImportError("Unsupported document. Expected three-unity-scene format version 1, 2, 3, 4, 5, 6, 7, or 8.");
                 return;
             }
 
@@ -38,10 +38,22 @@ namespace ThreeUnity.Bridge.Editor
             AttachRuntimeProfile(root, document.runtime);
             if (HasComponentDescriptors(document.nodes)) root.AddComponent<ThreeUnityComponentApplicator>();
             var materialCapabilities = IndexMaterialAnimationCapabilities(document);
-            var textures = ImportTextures(context, document.textures ?? Array.Empty<TextureRecord>(), document.version);
+            var textureRecords = document.textures ?? Array.Empty<TextureRecord>();
+            var textures = ImportTextures(context, textureRecords, document.version);
             var materialRecords = document.materials ?? Array.Empty<MaterialRecord>();
-            var materials = ImportMaterials(context, materialRecords, textures, materialCapabilities, document.version);
-            var meshes = ImportMeshes(context, document.meshes ?? Array.Empty<MeshRecord>(), document.unitScaleMeters);
+            var textureRecordsById = document.version >= 8
+                ? IndexTextureRecords(textureRecords)
+                : new Dictionary<string, TextureRecord>();
+            var tangentSpaceNormalMaterials = document.version >= 8
+                ? ValidateV8Materials(context, materialRecords, textures, textureRecordsById)
+                : new HashSet<string>();
+            var materials = ImportMaterials(context, materialRecords, textures, textureRecordsById, materialCapabilities, document.version);
+            var meshes = ImportMeshes(
+                context,
+                document.meshes ?? Array.Empty<MeshRecord>(),
+                tangentSpaceNormalMaterials,
+                document.unitScaleMeters,
+                document.version);
             var primitives = ImportPrimitives(context, document.primitives ?? Array.Empty<PrimitiveRecord>(), materialRecords, document.unitScaleMeters);
             var instancedMeshes = IndexInstancedMeshes(document.version >= 6
                 ? document.instancedMeshes ?? Array.Empty<InstancedMeshRecord>()
@@ -93,7 +105,8 @@ namespace ThreeUnity.Bridge.Editor
                     materials,
                     materialRecords,
                     instancedColorMaterials,
-                    document.unitScaleMeters);
+                    document.unitScaleMeters,
+                    document.version);
                 if (importCameras && node.camera != null && !string.IsNullOrEmpty(node.camera.type))
                     AttachCamera(gameObject, node.camera, document.unitScaleMeters);
                 if (importLights && node.light != null && !string.IsNullOrEmpty(node.light.type))
@@ -112,6 +125,7 @@ namespace ThreeUnity.Bridge.Editor
                     document.meshes ?? Array.Empty<MeshRecord>(),
                     document.primitives ?? Array.Empty<PrimitiveRecord>(),
                     materialRecords,
+                    document.version,
                     document.unitScaleMeters,
                     out var materialAnimationClips);
                 AttachAnimationPlayer(root, clips, animationRecords, document.defaultAnimationId, document.autoplayAnimation, materialAnimationClips);
@@ -586,10 +600,219 @@ namespace ThreeUnity.Bridge.Editor
             Raw,
         }
 
+        private static Dictionary<string, TextureRecord> IndexTextureRecords(TextureRecord[] records)
+        {
+            var result = new Dictionary<string, TextureRecord>();
+            foreach (var record in records)
+            {
+                if (record == null || string.IsNullOrEmpty(record.id))
+                    throw new InvalidDataException("A version 8 texture record is missing its id.");
+                if (result.ContainsKey(record.id))
+                    throw new InvalidDataException($"Texture id '{record.id}' appears more than once.");
+                result.Add(record.id, record);
+            }
+            return result;
+        }
+
+        private static HashSet<string> ValidateV8Materials(
+            AssetImportContext context,
+            MaterialRecord[] records,
+            Dictionary<string, Texture2D> textures,
+            Dictionary<string, TextureRecord> textureRecords)
+        {
+            var tangentSpaceNormalMaterials = new HashSet<string>();
+            var materialIds = new HashSet<string>();
+            foreach (var record in records)
+            {
+                if (record == null || string.IsNullOrEmpty(record.id))
+                    throw new InvalidDataException("A version 8 material record is missing its id.");
+                if (!materialIds.Add(record.id))
+                    throw new InvalidDataException($"Material id '{record.id}' appears more than once.");
+
+                RequireFinite(record.metallic, record.id, "metallic");
+                RequireFinite(record.roughness, record.id, "roughness");
+                RequireFinite(record.emissiveIntensity, record.id, "emissiveIntensity");
+                ReadRequiredTextureST(record.metalnessTextureST, record.id, "metalnessMap");
+                ReadRequiredTextureST(record.roughnessTextureST, record.id, "roughnessMap");
+                ReadRequiredTextureST(record.normalTextureST, record.id, "normalMap");
+                ReadRequiredTextureST(record.emissiveTextureST, record.id, "emissiveMap");
+                ReadNormalScale(record.normalScale, record.id);
+
+                ValidateV8TextureReference(record, "metalnessMap", record.metalnessTextureId, textures, textureRecords, true);
+                ValidateV8TextureReference(record, "roughnessMap", record.roughnessTextureId, textures, textureRecords, true);
+                ValidateV8TextureReference(record, "normalMap", record.normalTextureId, textures, textureRecords, true);
+                ValidateV8TextureReference(record, "emissiveMap", record.emissiveTextureId, textures, textureRecords, false);
+
+                if (string.IsNullOrEmpty(record.normalTextureId))
+                {
+                    if (record.normalMapType != "none")
+                        throw new InvalidDataException($"Material '{record.id}' has no normalTextureId, so normalMapType must be 'none', not '{record.normalMapType}'.");
+                }
+                else
+                {
+                    if (record.normalMapType != "tangent-space")
+                        throw new InvalidDataException($"Material '{record.id}' has normal texture '{record.normalTextureId}', so normalMapType must be 'tangent-space', not '{record.normalMapType}'.");
+                    tangentSpaceNormalMaterials.Add(record.id);
+                }
+
+                if (!string.IsNullOrEmpty(record.emissiveTextureId) && textureRecords[record.emissiveTextureId].colorSpace != "srgb")
+                    context.LogImportWarning($"Material '{record.id}' emissiveMap texture '{TextureLabel(textureRecords[record.emissiveTextureId])}' uses color space '{textureRecords[record.emissiveTextureId].colorSpace}'; sRGB is recommended for emissive color data.");
+
+                ValidateMetallicRoughnessCompatibility(record, textures, textureRecords);
+            }
+            return tangentSpaceNormalMaterials;
+        }
+
+        private static void ValidateV8TextureReference(
+            MaterialRecord material,
+            string slot,
+            string textureId,
+            Dictionary<string, Texture2D> textures,
+            Dictionary<string, TextureRecord> textureRecords,
+            bool requireNonColor)
+        {
+            if (string.IsNullOrEmpty(textureId)) return;
+            if (!textureRecords.TryGetValue(textureId, out var source) || !textures.ContainsKey(textureId))
+                throw new InvalidDataException($"Material '{material.id}' {slot} references missing texture '{textureId}'.");
+            if (requireNonColor && source.colorSpace != "none" && source.colorSpace != "linear")
+                throw new InvalidDataException($"Material '{material.id}' {slot} texture '{TextureLabel(source)}' must use color space 'none' or 'linear', not '{source.colorSpace}'.");
+        }
+
+        private static void ValidateMetallicRoughnessCompatibility(
+            MaterialRecord material,
+            Dictionary<string, Texture2D> textures,
+            Dictionary<string, TextureRecord> textureRecords)
+        {
+            if (string.IsNullOrEmpty(material.metalnessTextureId) || string.IsNullOrEmpty(material.roughnessTextureId)) return;
+            var metalTexture = textures[material.metalnessTextureId];
+            var roughTexture = textures[material.roughnessTextureId];
+            var metalRecord = textureRecords[material.metalnessTextureId];
+            var roughRecord = textureRecords[material.roughnessTextureId];
+            var metalSt = ReadRequiredTextureST(material.metalnessTextureST, material.id, "metalnessMap");
+            var roughSt = ReadRequiredTextureST(material.roughnessTextureST, material.id, "roughnessMap");
+
+            if (metalTexture.width != roughTexture.width || metalTexture.height != roughTexture.height)
+                ThrowPbrSamplingMismatch(material, "dimensions", $"{metalTexture.width}x{metalTexture.height}", $"{roughTexture.width}x{roughTexture.height}");
+            if ((metalSt - roughSt).sqrMagnitude > 0.0000000001f)
+                ThrowPbrSamplingMismatch(material, "texture ST", metalSt.ToString("R"), roughSt.ToString("R"));
+            if (metalRecord.wrapS != roughRecord.wrapS) ThrowPbrSamplingMismatch(material, "wrapS", metalRecord.wrapS, roughRecord.wrapS);
+            if (metalRecord.wrapT != roughRecord.wrapT) ThrowPbrSamplingMismatch(material, "wrapT", metalRecord.wrapT, roughRecord.wrapT);
+            if (metalRecord.filterMode != roughRecord.filterMode) ThrowPbrSamplingMismatch(material, "filterMode", metalRecord.filterMode, roughRecord.filterMode);
+            if (metalRecord.mipmaps != roughRecord.mipmaps) ThrowPbrSamplingMismatch(material, "mipmaps", metalRecord.mipmaps.ToString(), roughRecord.mipmaps.ToString());
+            if (metalRecord.anisotropy != roughRecord.anisotropy) ThrowPbrSamplingMismatch(material, "anisotropy", metalRecord.anisotropy.ToString(), roughRecord.anisotropy.ToString());
+        }
+
+        private static void ThrowPbrSamplingMismatch(MaterialRecord material, string field, string metalValue, string roughValue)
+        {
+            throw new InvalidDataException(
+                $"Material '{material.id}' metalnessMap and roughnessMap have incompatible {field} ({metalValue} versus {roughValue}). " +
+                "Format v8 requires both maps to use the same dimensions and sampling transform because Unity Metallic/Smoothness uses one packed texture.");
+        }
+
+        private static Texture2D CreateMetallicSmoothnessTexture(
+            MaterialRecord material,
+            Dictionary<string, Texture2D> textures,
+            Dictionary<string, TextureRecord> textureRecords)
+        {
+            var hasMetalness = !string.IsNullOrEmpty(material.metalnessTextureId);
+            var hasRoughness = !string.IsNullOrEmpty(material.roughnessTextureId);
+            var metalness = hasMetalness ? textures[material.metalnessTextureId] : null;
+            var roughness = hasRoughness ? textures[material.roughnessTextureId] : null;
+            if (hasMetalness) ValidateDerivedPbrSource(material, "metalnessMap", textureRecords[material.metalnessTextureId]);
+            if (hasRoughness) ValidateDerivedPbrSource(material, "roughnessMap", textureRecords[material.roughnessTextureId]);
+
+            var source = metalness != null ? metalness : roughness;
+            var metalnessPixels = metalness != null ? metalness.GetPixels(0) : null;
+            var roughnessPixels = roughness != null ? roughness.GetPixels(0) : null;
+            var output = new Color[source.width * source.height];
+            for (var index = 0; index < output.Length; index++)
+            {
+                var sourceMetalnessBlue = metalnessPixels == null ? 1f : metalnessPixels[index].b;
+                var sourceRoughnessGreen = roughnessPixels == null ? 1f : roughnessPixels[index].g;
+                output[index] = new Color(
+                    Mathf.Clamp01(material.metallic * sourceMetalnessBlue),
+                    0f,
+                    0f,
+                    1f - Mathf.Clamp01(material.roughness * sourceRoughnessGreen));
+            }
+
+            var derived = new Texture2D(source.width, source.height, TextureFormat.RGBA32, source.mipmapCount > 1, true)
+            {
+                name = $"{MaterialLabel(material)} Metallic Smoothness",
+            };
+            derived.SetPixels(output, 0);
+            derived.Apply(source.mipmapCount > 1, false);
+            CopySampler(source, derived);
+            return derived;
+        }
+
+        private static Texture2D CreateScaledNormalTexture(
+            MaterialRecord material,
+            Texture2D source,
+            TextureRecord sourceRecord,
+            Vector2 scale)
+        {
+            ValidateDerivedNormalSource(material, sourceRecord);
+            var sourcePixels = source.GetPixels(0);
+            if (sourcePixels.Length != source.width * source.height)
+                throw new InvalidDataException($"Material '{material.id}' normalMap texture '{TextureLabel(sourceRecord)}' returned {sourcePixels.Length} pixels for {source.width}x{source.height} data.");
+            var output = new Color[sourcePixels.Length];
+            for (var index = 0; index < output.Length; index++)
+            {
+                var normal = new Vector3(
+                    (sourcePixels[index].r * 2f - 1f) * scale.x,
+                    (sourcePixels[index].g * 2f - 1f) * scale.y,
+                    sourcePixels[index].b * 2f - 1f).normalized;
+                output[index] = new Color(normal.x * 0.5f + 0.5f, normal.y * 0.5f + 0.5f, normal.z * 0.5f + 0.5f, 1f);
+            }
+
+            var derived = new Texture2D(source.width, source.height, TextureFormat.RGBA32, source.mipmapCount > 1, true)
+            {
+                name = $"{MaterialLabel(material)} Scaled Normal",
+            };
+            derived.SetPixels(output, 0);
+            derived.Apply(source.mipmapCount > 1, false);
+            CopySampler(source, derived);
+            return derived;
+        }
+
+        private static void ValidateDerivedPbrSource(MaterialRecord material, string slot, TextureRecord source)
+        {
+            if (source.encoding == "encoded-image") return;
+            if (source.encoding == "raw" && source.componentType == "uint8") return;
+            if (source.encoding == "raw" && (source.componentType == "float16" || source.componentType == "float32"))
+                throw new InvalidDataException($"Material '{material.id}' {slot} texture '{TextureLabel(source)}' uses {source.componentType}; format v8 PBR mask packing currently accepts encoded or uint8 textures only; float PBR mask packing is not implemented.");
+            throw new InvalidDataException($"Material '{material.id}' {slot} texture '{TextureLabel(source)}' uses unsupported derived PBR source {source.encoding}/{source.componentType}.");
+        }
+
+        private static void ValidateDerivedNormalSource(MaterialRecord material, TextureRecord source)
+        {
+            if (source.encoding == "encoded-image") return;
+            if (source.encoding == "raw" && source.componentType == "uint8" && (source.pixelFormat == "rgb" || source.pixelFormat == "rgba")) return;
+            if (source.encoding == "raw" && (source.componentType == "float16" || source.componentType == "float32"))
+                throw new InvalidDataException($"Material '{material.id}' normalMap texture '{TextureLabel(source)}' uses {source.componentType}; format v8 scaled-normal derivation currently accepts encoded or uint8 textures only; float normal-map scaling is not implemented.");
+            throw new InvalidDataException($"Material '{material.id}' normalMap texture '{TextureLabel(source)}' must provide encoded RGB(A) or raw uint8 RGB/RGBA pixels for scaled-normal derivation, not {source.encoding}/{source.pixelFormat}/{source.componentType}.");
+        }
+
+        private static void CopySampler(Texture2D source, Texture2D target)
+        {
+            target.wrapModeU = source.wrapModeU;
+            target.wrapModeV = source.wrapModeV;
+            target.filterMode = source.filterMode;
+            target.anisoLevel = source.anisoLevel;
+        }
+
+        private static string MaterialLabel(MaterialRecord record) => string.IsNullOrEmpty(record.name) ? record.id : record.name;
+
+        private static bool UsesV8PbrShader(MaterialRecord record, int documentVersion) =>
+            documentVersion >= 8 &&
+            (record.sourceType == "MeshStandardMaterial" || record.sourceType == "MeshPhysicalMaterial");
+
         private Dictionary<string, Material> ImportMaterials(
             AssetImportContext context,
             MaterialRecord[] records,
             Dictionary<string, Texture2D> textures,
+            Dictionary<string, TextureRecord> textureRecords,
             Dictionary<string, MaterialAnimationCapabilities> animationCapabilities,
             int documentVersion)
         {
@@ -603,11 +826,57 @@ namespace ThreeUnity.Bridge.Editor
                     throw new InvalidDataException($"Material '{record.id}' render mode '{renderMode}' has no compatible shader.");
                 }
                 var material = new Material(shader) { name = string.IsNullOrEmpty(record.name) ? record.id : record.name };
+                SetFloat(material, "_ThreeUnityPbrV8", UsesV8PbrShader(record, documentVersion) ? 1f : 0f);
+                Texture2D metallicSmoothness = null;
+                Texture2D normalTexture = null;
+                var normalScale = 1f;
+                if (documentVersion >= 8)
+                {
+                    if (!string.IsNullOrEmpty(record.metalnessTextureId) || !string.IsNullOrEmpty(record.roughnessTextureId))
+                    {
+                        metallicSmoothness = CreateMetallicSmoothnessTexture(record, textures, textureRecords);
+                        context.AddObjectToAsset($"pbr_metallic_smoothness_{record.id}", metallicSmoothness);
+                    }
+                    if (!string.IsNullOrEmpty(record.normalTextureId))
+                    {
+                        var sourceNormal = textures[record.normalTextureId];
+                        var sourceNormalRecord = textureRecords[record.normalTextureId];
+                        var scale = ReadNormalScale(record.normalScale, record.id);
+                        if (scale.x < 0f || scale.y < 0f || !Mathf.Approximately(scale.x, scale.y))
+                        {
+                            normalTexture = CreateScaledNormalTexture(record, sourceNormal, sourceNormalRecord, scale);
+                            context.AddObjectToAsset($"pbr_scaled_normal_{record.id}", normalTexture);
+                        }
+                        else
+                        {
+                            normalTexture = sourceNormal;
+                            normalScale = scale.x;
+                        }
+                    }
+                }
                 var color = ReadColor(record.baseColor, Color.white);
                 SetColor(material, "_BaseColor", "_Color", color);
-                SetFloat(material, "_Metallic", record.metallic);
-                SetFloat(material, "_Smoothness", 1f - Mathf.Clamp01(record.roughness));
-                SetFloat(material, "_Glossiness", 1f - Mathf.Clamp01(record.roughness));
+                if (metallicSmoothness != null)
+                {
+                    SetTexture(material, "_MetallicGlossMap", metallicSmoothness);
+                    material.EnableKeyword("_METALLICGLOSSMAP");
+                    material.EnableKeyword("_METALLICSPECGLOSSMAP");
+                    SetFloat(material, "_Metallic", 1f);
+                    SetFloat(material, "_GlossMapScale", 1f);
+                    SetFloat(material, "_Smoothness", 1f);
+                    SetFloat(material, "_Glossiness", 1f);
+                    SetFloat(material, "_SmoothnessTextureChannel", 0f);
+                    var metallicSt = !string.IsNullOrEmpty(record.metalnessTextureId)
+                        ? ReadRequiredTextureST(record.metalnessTextureST, record.id, "metalnessMap")
+                        : ReadRequiredTextureST(record.roughnessTextureST, record.id, "roughnessMap");
+                    ApplyTextureST(material, "_MetallicGlossMap", metallicSt);
+                }
+                else
+                {
+                    SetFloat(material, "_Metallic", record.metallic);
+                    SetFloat(material, "_Smoothness", 1f - Mathf.Clamp01(record.roughness));
+                    SetFloat(material, "_Glossiness", 1f - Mathf.Clamp01(record.roughness));
+                }
                 SetFloat(material, "_Cutoff", record.alphaCutoff);
                 SetFloat(material, "_Unlit", record.unlit ? 1f : 0f);
                 SetFloat(material, "_UseVertexColor", record.vertexColors ? 1f : 0f);
@@ -620,13 +889,32 @@ namespace ThreeUnity.Bridge.Editor
                 if (!string.IsNullOrEmpty(record.normalTextureId) && textures.ContainsKey(record.normalTextureId))
                 {
                     material.EnableKeyword("_NORMALMAP");
-                    SetTexture(material, "_BumpMap", "_BumpMap", record.normalTextureId, textures);
+                    if (documentVersion >= 8)
+                    {
+                        SetTexture(material, "_BumpMap", normalTexture);
+                        SetFloat(material, "_BumpScale", normalScale);
+                        ApplyTextureST(material, "_BumpMap", ReadRequiredTextureST(record.normalTextureST, record.id, "normalMap"));
+                    }
+                    else
+                    {
+                        SetTexture(material, "_BumpMap", "_BumpMap", record.normalTextureId, textures);
+                    }
                 }
                 animationCapabilities.TryGetValue(record.id, out var capabilities);
-                if (ReadColor(record.emissive, Color.black).maxColorComponent > 0f || capabilities?.emission == true)
+                var emissionColor = ReadColor(record.emissive, Color.black) * ReadEmissiveIntensity(record, documentVersion);
+                if (documentVersion >= 8)
                 {
-                    SetColor(material, "_EmissionColor", "_EmissionColor", ReadColor(record.emissive, Color.black));
+                    SetColor(material, "_EmissionColor", "_EmissionColor", emissionColor);
                     SetTexture(material, "_EmissionMap", "_EmissionMap", record.emissiveTextureId, textures);
+                    ApplyTextureST(material, "_EmissionMap", ReadRequiredTextureST(record.emissiveTextureST, record.id, "emissiveMap"));
+                }
+                if (emissionColor.maxColorComponent > 0f || capabilities?.emission == true)
+                {
+                    if (documentVersion < 8)
+                    {
+                        SetColor(material, "_EmissionColor", "_EmissionColor", emissionColor);
+                        SetTexture(material, "_EmissionMap", "_EmissionMap", record.emissiveTextureId, textures);
+                    }
                     if (documentVersion >= 7)
                         material.globalIlluminationFlags &= ~MaterialGlobalIlluminationFlags.EmissiveIsBlack;
                     material.EnableKeyword("_EMISSION");
@@ -638,7 +926,12 @@ namespace ThreeUnity.Bridge.Editor
             return result;
         }
 
-        private Dictionary<string, Mesh> ImportMeshes(AssetImportContext context, MeshRecord[] records, float unitScale)
+        private Dictionary<string, Mesh> ImportMeshes(
+            AssetImportContext context,
+            MeshRecord[] records,
+            HashSet<string> tangentSpaceNormalMaterials,
+            float unitScale,
+            int documentVersion)
         {
             var result = new Dictionary<string, Mesh>();
             foreach (var record in records)
@@ -650,11 +943,19 @@ namespace ThreeUnity.Bridge.Editor
                 }
                 var mesh = new Mesh { name = string.IsNullOrEmpty(record.name) ? record.id : record.name };
                 var vertexCount = record.positions.Length / 3;
+                var requiresTangents = documentVersion >= 8 && MeshUsesMaterial(record, tangentSpaceNormalMaterials);
+                var sourceTangents = documentVersion >= 8 ? record.tangents ?? Array.Empty<float>() : Array.Empty<float>();
+                if (sourceTangents.Length != 0 && sourceTangents.Length != vertexCount * 4)
+                    throw new InvalidDataException($"Mesh '{record.id}' has {sourceTangents.Length} tangent values for {vertexCount} vertices; expected zero or {vertexCount * 4}.");
+                if (requiresTangents && sourceTangents.Length == 0 &&
+                    (record.normals == null || record.normals.Length != record.positions.Length || record.uv0 == null || record.uv0.Length != vertexCount * 2))
+                    throw new InvalidDataException($"Mesh '{record.id}' uses a tangent-space normal map but has no source tangents; Unity can recalculate tangents only when complete normals and uv0 are present.");
                 if (vertexCount > 65535) mesh.indexFormat = IndexFormat.UInt32;
                 mesh.vertices = ReadVectors3(record.positions, true, unitScale);
                 if (record.normals != null && record.normals.Length == record.positions.Length) mesh.normals = ReadVectors3(record.normals, true, 1f);
                 if (record.uv0 != null && record.uv0.Length / 2 == vertexCount) mesh.uv = ReadVectors2(record.uv0);
                 if (record.colors != null && record.colors.Length / 4 == vertexCount) mesh.colors = ReadColors(record.colors);
+                if (sourceTangents.Length > 0) mesh.tangents = ReadTangents(sourceTangents, record.id);
                 if ((record.skinIndices != null && record.skinIndices.Length > 0) || (record.skinWeights != null && record.skinWeights.Length > 0))
                 {
                     if (record.skinIndices == null || record.skinWeights == null || record.skinIndices.Length != vertexCount * 4 || record.skinWeights.Length != vertexCount * 4)
@@ -686,12 +987,22 @@ namespace ThreeUnity.Bridge.Editor
                     }
                 }
                 if (mesh.normals == null || mesh.normals.Length == 0) mesh.RecalculateNormals();
+                if (requiresTangents && sourceTangents.Length == 0) mesh.RecalculateTangents();
                 AddBlendShapes(mesh, record, vertexCount, unitScale);
                 mesh.RecalculateBounds();
                 context.AddObjectToAsset(record.id, mesh);
                 result[record.id] = mesh;
             }
             return result;
+        }
+
+        private static bool MeshUsesMaterial(MeshRecord mesh, HashSet<string> materialIds)
+        {
+            foreach (var materialId in mesh.materialIds ?? Array.Empty<string>())
+            {
+                if (materialIds.Contains(materialId)) return true;
+            }
+            return false;
         }
 
         private Dictionary<string, ImportedPrimitive> ImportPrimitives(
@@ -971,7 +1282,8 @@ namespace ThreeUnity.Bridge.Editor
             Dictionary<string, Material> materials,
             MaterialRecord[] materialRecords,
             Dictionary<string, Material> instancedColorMaterials,
-            float unitScale)
+            float unitScale,
+            int documentVersion)
         {
             if (string.IsNullOrEmpty(node.instancedMeshId)) return;
             if (!instancedMeshes.TryGetValue(node.instancedMeshId, out var record))
@@ -1042,7 +1354,8 @@ namespace ThreeUnity.Bridge.Editor
                 materials,
                 materialRecords,
                 instancedColorMaterials,
-                instanceColors.Length > 0);
+                instanceColors.Length > 0,
+                documentVersion);
 
             if (generateColliders)
                 context.LogImportWarning($"Instanced node '{node.id}' does not generate per-instance colliders. Re-export with instancedMeshMode: \"expanded\" to use generated colliders.");
@@ -1056,7 +1369,8 @@ namespace ThreeUnity.Bridge.Editor
             Dictionary<string, Material> materials,
             MaterialRecord[] materialRecords,
             Dictionary<string, Material> instancedColorMaterials,
-            bool useInstanceColors)
+            bool useInstanceColors,
+            int documentVersion)
         {
             var materialIds = meshRecord.materialIds ?? Array.Empty<string>();
             if (materialIds.Length == 0)
@@ -1073,7 +1387,7 @@ namespace ThreeUnity.Bridge.Editor
                     throw new InvalidDataException($"Instanced mesh '{instancedRecord.id}' references missing material '{materialId}'.");
                 material.enableInstancing = true;
                 shared[slot] = useInstanceColors
-                    ? GetOrCreateInstancedColorMaterial(context, materialId, material, materialRecords, instancedColorMaterials)
+                    ? GetOrCreateInstancedColorMaterial(context, materialId, material, materialRecords, instancedColorMaterials, documentVersion)
                     : material;
             }
             return shared;
@@ -1084,7 +1398,8 @@ namespace ThreeUnity.Bridge.Editor
             string materialId,
             Material baseMaterial,
             MaterialRecord[] materialRecords,
-            Dictionary<string, Material> instancedColorMaterials)
+            Dictionary<string, Material> instancedColorMaterials,
+            int documentVersion)
         {
             if (instancedColorMaterials.TryGetValue(materialId, out var existing)) return existing;
             var shader = Shader.Find("ThreeUnity/Instanced Surface");
@@ -1136,12 +1451,23 @@ namespace ThreeUnity.Bridge.Editor
             }
             SetFloat(variant, "_UseVertexColor", materialRecord.vertexColors ? 1f : 0f);
             SetFloat(variant, "_Unlit", materialRecord.unlit ? 1f : 0f);
-            SetFloat(variant, "_Metallic", materialRecord.metallic);
-            SetFloat(variant, "_Smoothness", 1f - Mathf.Clamp01(materialRecord.roughness));
-            SetFloat(variant, "_Glossiness", 1f - Mathf.Clamp01(materialRecord.roughness));
+            SetFloat(variant, "_ThreeUnityPbrV8", UsesV8PbrShader(materialRecord, documentVersion) ? 1f : 0f);
+            CopyFloatProperty(baseMaterial, variant, "_Metallic");
+            CopyFloatProperty(baseMaterial, variant, "_Smoothness");
+            CopyFloatProperty(baseMaterial, variant, "_Glossiness");
+            CopyFloatProperty(baseMaterial, variant, "_GlossMapScale");
+            CopyFloatProperty(baseMaterial, variant, "_SmoothnessTextureChannel");
+            CopyFloatProperty(baseMaterial, variant, "_BumpScale");
             SetFloat(variant, "_Cutoff", materialRecord.alphaCutoff);
-            if (variant.HasProperty("_EmissionColor"))
-                variant.SetColor("_EmissionColor", ReadColor(materialRecord.emissive, Color.black));
+            CopyColorProperty(baseMaterial, variant, "_EmissionColor");
+            CopyTextureProperty(baseMaterial, variant, "_MetallicGlossMap");
+            CopyTextureProperty(baseMaterial, variant, "_BumpMap");
+            CopyTextureProperty(baseMaterial, variant, "_EmissionMap");
+            CopyKeyword(baseMaterial, variant, "_METALLICGLOSSMAP");
+            CopyKeyword(baseMaterial, variant, "_METALLICSPECGLOSSMAP");
+            CopyKeyword(baseMaterial, variant, "_NORMALMAP");
+            CopyKeyword(baseMaterial, variant, "_EMISSION");
+            variant.globalIlluminationFlags = baseMaterial.globalIlluminationFlags;
             ConfigureSurface(variant, materialRecord.transparent || baseMaterial.renderQueue >= (int)RenderQueue.Transparent, materialRecord.doubleSided);
             context.AddObjectToAsset($"instanced_color_{materialId}", variant);
             instancedColorMaterials.Add(materialId, variant);
@@ -1261,6 +1587,7 @@ namespace ThreeUnity.Bridge.Editor
             MeshRecord[] meshRecords,
             PrimitiveRecord[] primitiveRecords,
             MaterialRecord[] materialRecords,
+            int documentVersion,
             float unitScale,
             out ThreeUnityMaterialAnimationClip[] materialAnimationClips)
         {
@@ -1311,7 +1638,8 @@ namespace ThreeUnity.Bridge.Editor
                             nodesById,
                             meshesById,
                             primitivesById,
-                            materialsById);
+                            materialsById,
+                            documentVersion);
                         continue;
                     }
                     var path = AnimationUtility.CalculateTransformPath(target.transform, root.transform);
@@ -1345,7 +1673,8 @@ namespace ThreeUnity.Bridge.Editor
             Dictionary<string, NodeRecord> nodesById,
             Dictionary<string, MeshRecord> meshesById,
             Dictionary<string, PrimitiveRecord> primitivesById,
-            Dictionary<string, MaterialRecord> materialsById)
+            Dictionary<string, MaterialRecord> materialsById,
+            int documentVersion)
         {
             if (track.interpolation != "linear" || !track.baked)
                 throw new InvalidDataException($"Animation '{animation.id}' material track for node '{track.targetNodeId}' must be baked with linear interpolation.");
@@ -1420,7 +1749,7 @@ namespace ThreeUnity.Bridge.Editor
             if (matchedSlots.Count == 0)
                 throw new InvalidDataException($"Animation '{animation.id}' material track targets node '{node.id}', {renderableKind} '{renderableId}', source material index {track.materialIndex}, which maps to no renderer slot among {actualSlotCount} slots.");
 
-            var initialValue = ReadInitialMaterialValue(material, property);
+            var initialValue = ReadInitialMaterialValue(material, property, documentVersion);
             foreach (var materialSlot in matchedSlots)
             {
                 bindings.Add(new ThreeUnityMaterialAnimationBinding
@@ -1761,6 +2090,36 @@ namespace ThreeUnity.Bridge.Editor
             if (fallback != preferred && material.HasProperty(fallback)) material.SetTexture(fallback, texture);
         }
 
+        private static void SetTexture(Material material, string property, Texture texture)
+        {
+            if (texture != null && material.HasProperty(property)) material.SetTexture(property, texture);
+        }
+
+        private static void CopyFloatProperty(Material source, Material target, string property)
+        {
+            if (source.HasProperty(property) && target.HasProperty(property))
+                target.SetFloat(property, source.GetFloat(property));
+        }
+
+        private static void CopyColorProperty(Material source, Material target, string property)
+        {
+            if (source.HasProperty(property) && target.HasProperty(property))
+                target.SetColor(property, source.GetColor(property));
+        }
+
+        private static void CopyTextureProperty(Material source, Material target, string property)
+        {
+            if (!source.HasProperty(property) || !target.HasProperty(property)) return;
+            target.SetTexture(property, source.GetTexture(property));
+            target.SetTextureScale(property, source.GetTextureScale(property));
+            target.SetTextureOffset(property, source.GetTextureOffset(property));
+        }
+
+        private static void CopyKeyword(Material source, Material target, string keyword)
+        {
+            if (source.IsKeywordEnabled(keyword)) target.EnableKeyword(keyword);
+        }
+
         private static TextureWrapMode ReadTextureWrapMode(string value, string textureName)
         {
             switch (value)
@@ -1785,6 +2144,39 @@ namespace ThreeUnity.Bridge.Editor
             return new Vector4(values[0], values[1], values[2], values[3]);
         }
 
+        private static Vector4 ReadRequiredTextureST(float[] values, string materialId, string slot)
+        {
+            if (values == null || values.Length != 4)
+                throw new InvalidDataException($"Material '{materialId}' {slot} texture ST must contain exactly four finite values, but found {values?.Length ?? 0}.");
+            for (var index = 0; index < values.Length; index++)
+            {
+                if (!IsFinite(values[index]))
+                    throw new InvalidDataException($"Material '{materialId}' {slot} texture ST contains a non-finite value at index {index}.");
+            }
+            return new Vector4(values[0], values[1], values[2], values[3]);
+        }
+
+        private static Vector2 ReadNormalScale(float[] values, string materialId)
+        {
+            if (values == null || values.Length != 2)
+                throw new InvalidDataException($"Material '{materialId}' normalScale must contain exactly two finite values, but found {values?.Length ?? 0}.");
+            for (var index = 0; index < values.Length; index++)
+            {
+                if (!IsFinite(values[index]))
+                    throw new InvalidDataException($"Material '{materialId}' normalScale contains a non-finite value at index {index}.");
+            }
+            return new Vector2(values[0], values[1]);
+        }
+
+        private static float ReadEmissiveIntensity(MaterialRecord material, int documentVersion) =>
+            documentVersion >= 8 ? material.emissiveIntensity : 1f;
+
+        private static void RequireFinite(float value, string materialId, string property)
+        {
+            if (!IsFinite(value))
+                throw new InvalidDataException($"Material '{materialId}' {property} must be finite.");
+        }
+
         private static void ApplyBaseMapST(Material material, Vector4 st)
         {
             st = ThreeUnityMaterialAnimationUtility.ConvertBaseMapST(st);
@@ -1802,6 +2194,19 @@ namespace ThreeUnity.Bridge.Editor
             }
             if (material.HasProperty("_BaseMap_ST")) material.SetVector("_BaseMap_ST", st);
             if (material.HasProperty("_MainTex_ST")) material.SetVector("_MainTex_ST", st);
+        }
+
+        private static void ApplyTextureST(Material material, string property, Vector4 st)
+        {
+            var scale = new Vector2(st.x, st.y);
+            var offset = new Vector2(st.z, st.w);
+            if (material.HasProperty(property))
+            {
+                material.SetTextureScale(property, scale);
+                material.SetTextureOffset(property, offset);
+            }
+            var stProperty = property + "_ST";
+            if (material.HasProperty(stProperty)) material.SetVector(stProperty, st);
         }
 
         private static bool IsMaterialAnimationProperty(string property)
@@ -1840,7 +2245,7 @@ namespace ThreeUnity.Bridge.Editor
             }
         }
 
-        private static Vector4 ReadInitialMaterialValue(MaterialRecord material, ThreeUnityMaterialAnimationProperty property)
+        private static Vector4 ReadInitialMaterialValue(MaterialRecord material, ThreeUnityMaterialAnimationProperty property, int documentVersion)
         {
             switch (property)
             {
@@ -1848,7 +2253,7 @@ namespace ThreeUnity.Bridge.Editor
                     var baseColor = ReadColor(material.baseColor, Color.white);
                     return new Vector4(baseColor.r, baseColor.g, baseColor.b, baseColor.a);
                 case ThreeUnityMaterialAnimationProperty.Emissive:
-                    var emissive = ReadColor(material.emissive, Color.black);
+                    var emissive = ReadColor(material.emissive, Color.black) * ReadEmissiveIntensity(material, documentVersion);
                     return new Vector4(emissive.r, emissive.g, emissive.b, 0f);
                 case ThreeUnityMaterialAnimationProperty.Metallic:
                     return new Vector4(material.metallic, 0f, 0f, 0f);
@@ -1887,6 +2292,24 @@ namespace ThreeUnity.Bridge.Editor
         {
             var output = new Vector2[values.Length / 2];
             for (var index = 0; index < output.Length; index++) output[index] = new Vector2(values[index * 2], values[index * 2 + 1]);
+            return output;
+        }
+
+        private static Vector4[] ReadTangents(float[] values, string meshId)
+        {
+            var output = new Vector4[values.Length / 4];
+            for (var index = 0; index < output.Length; index++)
+            {
+                var offset = index * 4;
+                for (var component = 0; component < 4; component++)
+                {
+                    if (!IsFinite(values[offset + component]))
+                        throw new InvalidDataException($"Mesh '{meshId}' tangent {index} contains a non-finite value at component {component}.");
+                }
+                // Mirroring geometry across Z reflects the tangent basis. Mirror tangent Z and
+                // flip w once so tangent-space normal X/Y retain their original Three.js meaning.
+                output[index] = new Vector4(values[offset], values[offset + 1], -values[offset + 2], -values[offset + 3]);
+            }
             return output;
         }
 
@@ -2002,7 +2425,7 @@ namespace ThreeUnity.Bridge.Editor
         [Serializable] private sealed class CameraRecord { public string type; public float fov; public float near; public float far; public float top; public float bottom; }
         [Serializable] private sealed class LightRecord { public string type; public float[] color; public float intensity; public float range; public float spotAngleRadians; public float penumbra; public bool castShadow; }
         [Serializable] private sealed class ComponentRecord { public string type; public string dataJson; }
-        [Serializable] private sealed class MeshRecord { public string id; public string name; public float[] positions; public float[] normals; public float[] uv0; public float[] colors; public int[] indices; public MeshGroupRecord[] groups; public string[] materialIds; public int[] skinIndices; public float[] skinWeights; public MorphTargetRecord[] morphTargets; }
+        [Serializable] private sealed class MeshRecord { public string id; public string name; public float[] positions; public float[] normals; public float[] uv0; public float[] tangents; public float[] colors; public int[] indices; public MeshGroupRecord[] groups; public string[] materialIds; public int[] skinIndices; public float[] skinWeights; public MorphTargetRecord[] morphTargets; }
         [Serializable] private sealed class PrimitiveRecord { public string id; public string name; public string type; public float[] positions; public float[] colors; public int[] indices; public MeshGroupRecord[] groups; public string[] materialIds; public float[] spriteCenter; }
         [Serializable] private sealed class InstancedMeshRecord { public string id; public string name; public string meshId; public int count; public float[] matrices; public float[] colors; }
         [Serializable] private sealed class MorphTargetRecord { public string name; public float[] positionDeltas; public float[] normalDeltas; }
@@ -2012,8 +2435,11 @@ namespace ThreeUnity.Bridge.Editor
         [Serializable] private sealed class AnimationTrackRecord { public string targetNodeId; public string property; public int morphTargetIndex = -1; public int materialIndex = -1; public float[] times; public float[] values; public string interpolation; public bool baked; }
         [Serializable] private sealed class MaterialRecord
         {
-            public string id; public string name; public float[] baseColor; public float[] emissive; public float metallic; public float roughness = 0.5f; public bool transparent; public bool doubleSided; public float alphaCutoff; public bool unlit; public bool vertexColors;
+            public string id; public string name; public string sourceType; public float[] baseColor; public float[] emissive; public float metallic; public float roughness = 0.5f; public bool transparent; public bool doubleSided; public float alphaCutoff; public bool unlit; public bool vertexColors;
             public string baseColorTextureId; public string emissiveTextureId; public string normalTextureId; public float[] baseColorTextureST;
+            public string metalnessTextureId; public string roughnessTextureId; public string metallicRoughnessTextureId;
+            public float[] metalnessTextureST; public float[] roughnessTextureST; public float[] normalTextureST; public float[] emissiveTextureST;
+            public string normalMapType; public float[] normalScale; public float emissiveIntensity = 1f;
             public string renderMode = "surface"; public float pointSize = 1f; public bool sizeAttenuation = true; public float spriteRotation;
         }
         [Serializable] private sealed class TextureRecord

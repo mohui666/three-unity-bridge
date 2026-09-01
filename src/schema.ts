@@ -5,7 +5,8 @@ export const THREE_UNITY_MORPH_VERSION = 3 as const;
 export const THREE_UNITY_MATERIAL_ANIMATION_VERSION = 4 as const;
 export const THREE_UNITY_PRIMITIVE_VERSION = 5 as const;
 export const THREE_UNITY_INSTANCED_VERSION = 6 as const;
-export const THREE_UNITY_VERSION = 7 as const;
+export const THREE_UNITY_TEXTURE_VERSION = 7 as const;
+export const THREE_UNITY_VERSION = 8 as const;
 
 export type Vec2 = [number, number];
 export type Vec3 = [number, number, number];
@@ -106,6 +107,8 @@ export interface ThreeUnityMesh {
   normals: number[];
   uv0: number[];
   colors: number[];
+  /** Empty, or one xyzw tangent per vertex in Three.js tangent-basis coordinates. */
+  tangents: number[];
   indices: number[];
   groups: ThreeUnityMeshGroup[];
   materialIds: string[];
@@ -194,6 +197,7 @@ export interface ThreeUnityMeshGroup {
 }
 
 export type ThreeUnityMaterialRenderMode = "surface" | "line" | "points" | "sprite";
+export type ThreeUnityNormalMapType = "none" | "tangent-space";
 
 export interface ThreeUnityMaterial {
   id: string;
@@ -212,7 +216,17 @@ export interface ThreeUnityMaterial {
   baseColorTextureId: string;
   baseColorTextureST: Vec4;
   emissiveTextureId: string;
+  emissiveTextureST: Vec4;
   normalTextureId: string;
+  normalTextureST: Vec4;
+  normalMapType: ThreeUnityNormalMapType;
+  normalScale: Vec2;
+  emissiveIntensity: number;
+  metalnessTextureId: string;
+  roughnessTextureId: string;
+  metalnessTextureST: Vec4;
+  roughnessTextureST: Vec4;
+  /** Deprecated v1-v7 compatibility field. V8 uses the separate map ids above. */
   metallicRoughnessTextureId: string;
   renderMode: ThreeUnityMaterialRenderMode;
   pointSize: number;
@@ -274,10 +288,11 @@ export function validateDocument(value: unknown): ValidationResult {
     && version !== THREE_UNITY_MATERIAL_ANIMATION_VERSION
     && version !== THREE_UNITY_PRIMITIVE_VERSION
     && version !== THREE_UNITY_INSTANCED_VERSION
+    && version !== THREE_UNITY_TEXTURE_VERSION
     && version !== THREE_UNITY_VERSION
   ) {
     errors.push(
-      `version must be ${THREE_UNITY_LEGACY_VERSION}, ${THREE_UNITY_SKINNED_VERSION}, ${THREE_UNITY_MORPH_VERSION}, ${THREE_UNITY_MATERIAL_ANIMATION_VERSION}, ${THREE_UNITY_PRIMITIVE_VERSION}, ${THREE_UNITY_INSTANCED_VERSION}, or ${THREE_UNITY_VERSION}.`,
+      `version must be ${THREE_UNITY_LEGACY_VERSION}, ${THREE_UNITY_SKINNED_VERSION}, ${THREE_UNITY_MORPH_VERSION}, ${THREE_UNITY_MATERIAL_ANIMATION_VERSION}, ${THREE_UNITY_PRIMITIVE_VERSION}, ${THREE_UNITY_INSTANCED_VERSION}, ${THREE_UNITY_TEXTURE_VERSION}, or ${THREE_UNITY_VERSION}.`,
     );
   }
   if (!Array.isArray(document.nodes)) errors.push("nodes must be an array.");
@@ -285,13 +300,16 @@ export function validateDocument(value: unknown): ValidationResult {
   if (
     (version === THREE_UNITY_PRIMITIVE_VERSION
       || version === THREE_UNITY_INSTANCED_VERSION
+      || version === THREE_UNITY_TEXTURE_VERSION
       || version === THREE_UNITY_VERSION)
     && !Array.isArray(document.primitives)
   ) {
     errors.push("primitives must be an array in version 5 or later.");
   }
   if (
-    (version === THREE_UNITY_INSTANCED_VERSION || version === THREE_UNITY_VERSION)
+    (version === THREE_UNITY_INSTANCED_VERSION
+      || version === THREE_UNITY_TEXTURE_VERSION
+      || version === THREE_UNITY_VERSION)
     && !Array.isArray(document.instancedMeshes)
   ) {
     errors.push("instancedMeshes must be an array in version 6 or later.");
@@ -311,21 +329,28 @@ export function validateDocument(value: unknown): ValidationResult {
     || version === THREE_UNITY_MATERIAL_ANIMATION_VERSION
     || version === THREE_UNITY_PRIMITIVE_VERSION
     || version === THREE_UNITY_INSTANCED_VERSION
+    || version === THREE_UNITY_TEXTURE_VERSION
     || version === THREE_UNITY_VERSION;
   const v3OrLater = version === THREE_UNITY_MORPH_VERSION
     || version === THREE_UNITY_MATERIAL_ANIMATION_VERSION
     || version === THREE_UNITY_PRIMITIVE_VERSION
     || version === THREE_UNITY_INSTANCED_VERSION
+    || version === THREE_UNITY_TEXTURE_VERSION
     || version === THREE_UNITY_VERSION;
   const v4OrLater = version === THREE_UNITY_MATERIAL_ANIMATION_VERSION
     || version === THREE_UNITY_PRIMITIVE_VERSION
     || version === THREE_UNITY_INSTANCED_VERSION
+    || version === THREE_UNITY_TEXTURE_VERSION
     || version === THREE_UNITY_VERSION;
   const v5OrLater = version === THREE_UNITY_PRIMITIVE_VERSION
     || version === THREE_UNITY_INSTANCED_VERSION
+    || version === THREE_UNITY_TEXTURE_VERSION
     || version === THREE_UNITY_VERSION;
-  const v6OrLater = version === THREE_UNITY_INSTANCED_VERSION || version === THREE_UNITY_VERSION;
-  const v7 = version === THREE_UNITY_VERSION;
+  const v6OrLater = version === THREE_UNITY_INSTANCED_VERSION
+    || version === THREE_UNITY_TEXTURE_VERSION
+    || version === THREE_UNITY_VERSION;
+  const v7OrLater = version === THREE_UNITY_TEXTURE_VERSION || version === THREE_UNITY_VERSION;
+  const v8 = version === THREE_UNITY_VERSION;
   const documentV2 = document as Partial<ThreeUnityDocument>;
   if (v2OrLater) {
     if (!Array.isArray(documentV2.skins)) errors.push("skins must be an array in version 2 or later.");
@@ -377,11 +402,13 @@ export function validateDocument(value: unknown): ValidationResult {
       if (v2OrLater && !Array.isArray(mesh.skinIndices)) errors.push(`meshes[${index}].skinIndices must be an array in version 2 or later.`);
       if (v2OrLater && !Array.isArray(mesh.skinWeights)) errors.push(`meshes[${index}].skinWeights must be an array in version 2 or later.`);
       if (v3OrLater) validateMorphTargets(mesh, `meshes[${index}]`, errors);
+      if (v8) validateMeshTangents(mesh, `meshes[${index}]`, errors);
     }
   }
 
   const materialsById = new Map<string, ThreeUnityMaterial>();
   const textureIds = new Set<string>();
+  const texturesById = new Map<string, ThreeUnityTexture>();
   if (v4OrLater && Array.isArray(document.textures)) {
     for (const [index, texture] of document.textures.entries()) {
       const path = `textures[${index}]`;
@@ -389,10 +416,11 @@ export function validateDocument(value: unknown): ValidationResult {
       else {
         if (textureIds.has(texture.id)) errors.push(`Duplicate texture id '${texture.id}'.`);
         textureIds.add(texture.id);
+        texturesById.set(texture.id, texture);
       }
       if (!isTextureWrap(texture.wrapS)) errors.push(`${path}.wrapS must be repeat, clamp, or mirror.`);
       if (!isTextureWrap(texture.wrapT)) errors.push(`${path}.wrapT must be repeat, clamp, or mirror.`);
-      if (v7) validateV7Texture(texture, path, errors);
+      if (v7OrLater) validateV7Texture(texture, path, errors);
     }
   }
   if (v4OrLater && Array.isArray(document.materials)) {
@@ -404,6 +432,7 @@ export function validateDocument(value: unknown): ValidationResult {
       if (!isFiniteNumberArray(material.baseColorTextureST) || material.baseColorTextureST.length !== 4) {
         errors.push(`${path}.baseColorTextureST must contain 4 finite values.`);
       }
+      if (v8) validateV8Material(material, path, texturesById, errors);
       if (v5OrLater) {
         if (!isMaterialRenderMode(material.renderMode)) errors.push(`${path}.renderMode must be surface, line, points, or sprite.`);
         if (material.renderMode === "points" && (!Number.isFinite(material.pointSize) || material.pointSize <= 0)) {
@@ -530,6 +559,110 @@ export function validateDocument(value: unknown): ValidationResult {
 }
 
 const AFFINE_MATRIX_TOLERANCE = 1e-6;
+
+function validateMeshTangents(mesh: ThreeUnityMesh, path: string, errors: string[]): void {
+  const vertexCount = Array.isArray(mesh.positions) && mesh.positions.length % 3 === 0
+    ? mesh.positions.length / 3
+    : -1;
+  if (
+    !isFiniteNumberArray(mesh.tangents)
+    || (mesh.tangents.length !== 0 && (vertexCount < 0 || mesh.tangents.length !== vertexCount * 4))
+  ) {
+    errors.push(`${path}.tangents must be empty or contain 4 finite values per vertex.`);
+  }
+}
+
+function validateV8Material(
+  material: ThreeUnityMaterial,
+  path: string,
+  texturesById: Map<string, ThreeUnityTexture>,
+  errors: string[],
+): void {
+  const textureIdFields = [
+    "metalnessTextureId",
+    "roughnessTextureId",
+    "normalTextureId",
+    "emissiveTextureId",
+  ] as const;
+  for (const field of textureIdFields) {
+    const textureId = material[field];
+    if (typeof textureId !== "string") errors.push(`${path}.${field} must be a string.`);
+    else if (textureId && !texturesById.has(textureId)) errors.push(`${path}.${field} references missing texture '${textureId}'.`);
+  }
+  if (typeof material.metallicRoughnessTextureId !== "string") {
+    errors.push(`${path}.metallicRoughnessTextureId must be a string.`);
+  }
+
+  const stFields = [
+    "metalnessTextureST",
+    "roughnessTextureST",
+    "normalTextureST",
+    "emissiveTextureST",
+  ] as const;
+  for (const field of stFields) {
+    if (!isFiniteNumberArray(material[field]) || material[field].length !== 4) {
+      errors.push(`${path}.${field} must contain 4 finite values.`);
+    }
+  }
+  if (!isFiniteNumberArray(material.normalScale) || material.normalScale.length !== 2) {
+    errors.push(`${path}.normalScale must contain 2 finite values.`);
+  }
+  if (!Number.isFinite(material.metallic)) errors.push(`${path}.metallic must be finite.`);
+  if (!Number.isFinite(material.roughness)) errors.push(`${path}.roughness must be finite.`);
+  if (!Number.isFinite(material.emissiveIntensity)) errors.push(`${path}.emissiveIntensity must be finite.`);
+  if (material.normalMapType !== "none" && material.normalMapType !== "tangent-space") {
+    errors.push(`${path}.normalMapType must be none or tangent-space.`);
+  }
+  if (typeof material.normalTextureId === "string") {
+    if (!material.normalTextureId && material.normalMapType !== "none") {
+      errors.push(`${path}.normalMapType must be none when normalTextureId is empty.`);
+    }
+    if (material.normalTextureId && material.normalMapType !== "tangent-space") {
+      errors.push(`${path}.normalMapType must be tangent-space when normalTextureId is present.`);
+    }
+  }
+
+  for (const [slot, textureId] of [
+    ["metalnessTextureId", material.metalnessTextureId],
+    ["roughnessTextureId", material.roughnessTextureId],
+    ["normalTextureId", material.normalTextureId],
+  ] as const) {
+    const texture = typeof textureId === "string" ? texturesById.get(textureId) : undefined;
+    if (texture && texture.colorSpace !== "none" && texture.colorSpace !== "linear") {
+      errors.push(`${path}.${slot} must reference a non-color texture with colorSpace none or linear.`);
+    }
+    if (texture?.encoding === "raw" && texture.componentType !== "uint8") {
+      errors.push(`${path}.${slot} must reference an encoded or uint8 texture for format-v8 PBR processing.`);
+    }
+  }
+
+  const metalness = typeof material.metalnessTextureId === "string"
+    ? texturesById.get(material.metalnessTextureId)
+    : undefined;
+  const roughness = typeof material.roughnessTextureId === "string"
+    ? texturesById.get(material.roughnessTextureId)
+    : undefined;
+  if (!metalness || !roughness) return;
+
+  const mismatches: string[] = [];
+  if (metalness.width !== roughness.width) mismatches.push("width");
+  if (metalness.height !== roughness.height) mismatches.push("height");
+  if (!sameNumberArray(material.metalnessTextureST, material.roughnessTextureST)) mismatches.push("texture ST");
+  if (metalness.wrapS !== roughness.wrapS) mismatches.push("wrapS");
+  if (metalness.wrapT !== roughness.wrapT) mismatches.push("wrapT");
+  if (metalness.filterMode !== roughness.filterMode) mismatches.push("filterMode");
+  if (metalness.mipmaps !== roughness.mipmaps) mismatches.push("mipmaps");
+  if (metalness.anisotropy !== roughness.anisotropy) mismatches.push("anisotropy");
+  if (mismatches.length > 0) {
+    errors.push(
+      `${path} metalness/roughness maps have incompatible ${mismatches.join(", ")}; format v8 requires metalnessMap and roughnessMap to use the same dimensions and sampling transform because Unity Metallic/Smoothness uses one packed texture.`,
+    );
+  }
+}
+
+function sameNumberArray(left: readonly number[] | undefined, right: readonly number[] | undefined): boolean {
+  return Boolean(left && right && left.length === right.length && left.every((value, index) => value === right[index]));
+}
 
 function validateInstancedMesh(
   instancedMesh: ThreeUnityInstancedMesh,
@@ -850,7 +983,7 @@ function isMaterialRenderMode(value: unknown): value is ThreeUnityMaterialRender
 function validateV7Texture(texture: ThreeUnityTexture, path: string, errors: string[]): void {
   if (typeof texture.name !== "string") errors.push(`${path}.name must be a string.`);
   if (texture.encoding !== "encoded-image" && texture.encoding !== "raw") {
-    errors.push(`${path}.encoding must be encoded-image or raw in version 7.`);
+    errors.push(`${path}.encoding must be encoded-image or raw in version 7 or later.`);
   }
   if (typeof texture.data !== "string" || texture.data.length === 0) errors.push(`${path}.data must be a non-empty base64 string.`);
   if (typeof texture.flipY !== "boolean") errors.push(`${path}.flipY must be a boolean.`);

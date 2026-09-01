@@ -88,7 +88,7 @@ if (!validation.valid) throw new Error(`Generated texture example is invalid: ${
 
 const encodedTextures = document.textures.filter((texture) => texture.encoding === "encoded-image");
 const rawTextures = document.textures.filter((texture) => texture.encoding === "raw");
-assert.equal(document.version, 7);
+assert.equal(document.version, 8);
 assert.equal(encodedTextures.length, 2);
 assert.equal(rawTextures.length, 5);
 assert.ok(document.textures.every((texture) => texture.data.length > 0));
@@ -113,7 +113,7 @@ if (!persistedValidation.valid) {
   throw new Error(`Persisted texture example is invalid: ${persistedValidation.errors.join(" ")}`);
 }
 
-console.log("format: 7");
+console.log("format: 8 (v7 texture encoding capability)");
 console.log("encoded images: 2");
 console.log("raw textures: 5");
 console.log("local source: embedded");
