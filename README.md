@@ -406,6 +406,7 @@ Three Unity Bridge 是场景、运行时与宿主桥，不是 JavaScript → C# 
 | 路径 | 职责 |
 |---|---|
 | `src/` | TypeScript exporter、CLI、协议与 browser-side logic SDK |
+| `src/texture-encoding.ts` | 纹理字节编码、图片来源解析与 resolver 类型；由 exporter 统一调用 |
 | `unity-package/` | UPM Runtime、Editor importer、Shaders、Samples 与 EditMode tests |
 | `webview-host/` | .NET 8 Windows WebView2 Host |
 | `webview-host-tests/` | Host 生命周期与恢复测试 |
